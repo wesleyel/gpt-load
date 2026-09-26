@@ -1,0 +1,161 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v2.0.0-rc.36)'
+        required: false
+        default: ''
+      create_release:
+        description: 'Create or update GitHub Release'
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    name: Build macOS ARM & Linux x86 Binaries
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Determine Version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=""
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            VER="${{ github.ref_name }}"
+          else
+            VER=$(git describe --tags --always 2>/dev/null || echo "v2.0.0-rc.36")
+          fi
+          echo "VERSION=${VER}" >> "$GITHUB_ENV"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Target build version: ${VER}"
+
+      - name: Validate and build web UI
+        uses: ./.github/actions/web-ci
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build Binaries (macOS ARM & Linux x86)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          echo "==> Building macOS ARM64 (Apple Silicon)..."
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath \
+            -ldflags "-s -w -X gpt-load/internal/platform/version.Version=${VERSION}" \
+            -o release/gpt-load-macos-arm64 .
+
+          echo "==> Building Linux AMD64 (x86_64)..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X gpt-load/internal/platform/version.Version=${VERSION}" \
+            -o release/gpt-load-linux-amd64 .
+
+          echo "==> Building macOS AMD64 (Intel)..."
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X gpt-load/internal/platform/version.Version=${VERSION}" \
+            -o release/gpt-load-macos-amd64 .
+
+          echo "==> Building Linux ARM64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+            -ldflags "-s -w -X gpt-load/internal/platform/version.Version=${VERSION}" \
+            -o release/gpt-load-linux-arm64 .
+
+          echo "==> Building Windows AMD64..."
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X gpt-load/internal/platform/version.Version=${VERSION}" \
+            -o release/gpt-load-windows-amd64.exe .
+
+          echo "==> Generating SHA256SUMS..."
+          cd release
+          sha256sum gpt-load-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gpt-load-${{ env.VERSION }}
+          path: release/*
+          retention-days: 30
+
+      - name: Create or Update GitHub Release
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == true))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          is_prerelease=false
+          if [[ "${VERSION}" == *"-rc"* || "${VERSION}" == *"-beta"* ]]; then
+            is_prerelease=true
+          fi
+
+          if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} exists, updating assets..."
+            gh release upload "${VERSION}" release/* --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            echo "Creating release ${VERSION}..."
+            notes=$(printf 'Automated release build for **%s**.\n\n### Included Binaries:\n- `gpt-load-macos-arm64`: macOS Apple Silicon (M1/M2/M3/M4)\n- `gpt-load-linux-amd64`: Linux x86_64\n- `gpt-load-macos-amd64`: macOS Intel\n- `gpt-load-linux-arm64`: Linux ARM64\n- `gpt-load-windows-amd64.exe`: Windows x86_64\n- `SHA256SUMS`: SHA256 Checksums\n' "${VERSION}")
+            gh release create "${VERSION}" release/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${VERSION}" \
+              --notes "${notes}" \
+              --prerelease="${is_prerelease}"
+          fi
+
+      - name: Set up Docker Buildx
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch')
+        continue-on-error: true
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch')
+        continue-on-error: true
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Docker Image (Linux x86_64)
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch')
+        continue-on-error: true
+        uses: docker/build-push-action@c2eb8c82302830f6a273e86c0e86b245e855c868 # v6.0.0
+        with:
+          context: .
+          target: prebuilt
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ env.VERSION }}
+            ghcr.io/${{ github.repository }}:latest
