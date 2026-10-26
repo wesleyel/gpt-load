@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func wsTestSession(t *testing.T, target string, proxyURLs ...string) *CodexWSSession {
@@ -695,26 +695,42 @@ func TestCodexWSSessionRejectsSDKReplacementConnection(t *testing.T) {
 }
 
 func TestCodexWSSessionPreservesIncompleteStatus(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		defer conn.Close()
-		if _, _, err := conn.ReadMessage(); err != nil {
-			return
-		}
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.incomplete","response":{"id":"resp_partial","status":"incomplete","usage":{"input_tokens":5,"output_tokens":1},"incomplete_details":{"reason":"max_output_tokens"}}}`)); err != nil {
-			t.Error(err)
-		}
-		_, _, _ = conn.ReadMessage()
-	}))
-	defer server.Close()
-	session := wsTestSession(t, server.URL)
-	result, err := session.ExecuteTurn(context.Background(), json.RawMessage(`{"model":"gpt-5","input":"hello"}`), nil)
-	if err == nil || result.Status != "incomplete" || result.ResponseID != "resp_partial" || !json.Valid(result.Usage) {
-		t.Fatalf("incomplete status/usage lost: result=%+v error=%v", result, err)
+	for _, scenario := range []struct {
+		reason       string
+		outputTokens int
+	}{
+		{reason: "max_output_tokens", outputTokens: 1},
+		{reason: "max_output_tokens", outputTokens: 0},
+		{reason: "interrupted", outputTokens: 0},
+	} {
+		t.Run(fmt.Sprintf("%s/output_tokens_%d", scenario.reason, scenario.outputTokens), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer conn.Close()
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.incomplete","response":{"id":"resp_partial","status":"incomplete","usage":{"input_tokens":5,"output_tokens":%d},"incomplete_details":{"reason":%q}}}`, scenario.outputTokens, scenario.reason))); err != nil {
+					t.Error(err)
+				}
+				_, _, _ = conn.ReadMessage()
+			}))
+			defer server.Close()
+			session := wsTestSession(t, server.URL)
+			result, err := session.ExecuteTurn(context.Background(), json.RawMessage(`{"model":"gpt-5","input":"hello"}`), nil)
+			if err == nil || result.Status != "incomplete" || result.ResponseID != "resp_partial" || !json.Valid(result.Usage) {
+				t.Fatalf("incomplete status/usage lost: result=%+v error=%v", result, err)
+			}
+			_, err = session.ExecuteTurn(context.Background(), json.RawMessage(`{"model":"gpt-5","previous_response_id":"resp_partial","input":"next"}`), nil)
+			var wsErr *CodexWSError
+			if !errors.As(err, &wsErr) || wsErr.Code != "session_closed" {
+				t.Fatalf("unrequested incomplete response allowed continuation: %v", err)
+			}
+		})
 	}
 }
 
@@ -1065,26 +1081,41 @@ func TestCodexWSSessionPreservesDoneErrorCode(t *testing.T) {
 }
 
 func TestCodexWSSessionFixedIdentity(t *testing.T) {
-	const wantUA = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
-	for _, model := range []string{"gpt-6-astra", "gpt-5.6-luna"} {
+	const wantUA = "codex-tui/0.164.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.164.0)"
+	for _, model := range []string{"gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-luna"} {
 		for _, test := range []struct {
-			name    string
-			headers http.Header
+			name        string
+			headers     http.Header
+			cacheKey    string
+			wantSession string
 		}{
 			{name: "absent"},
 			{name: "supplied", headers: http.Header{"Version": {"9.9.9"}, "User-Agent": {"codex_cli_rs/0.200.0"}}},
 			{name: "empty", headers: http.Header{"Version": {""}, "User-Agent": {""}}},
 			{name: "case variants", headers: http.Header{"version": {"9.9.9"}, "user-agent": {"custom-client/1.0"}}},
+			{name: "explicit session", headers: http.Header{"Session-Id": {"client-session"}, "Originator": {"custom-client"}}, wantSession: "client-session"},
+			{name: "cache session", cacheKey: "cache-session", wantSession: "cache-session"},
+			{name: "cache retains SDK precedence", headers: http.Header{"Session-Id": {"client-session"}}, cacheKey: "cache-session", wantSession: "cache-session"},
+			{name: "native cache session", headers: http.Header{"X-Openai-Internal-Codex-Responses-Lite": {"true"}}, cacheKey: "cache-session", wantSession: "cache-session"},
 		} {
 			t.Run(model+"/"+test.name, func(t *testing.T) {
 				var handshakes atomic.Int32
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					handshakes.Add(1)
-					if r.Header.Get("Version") != "0.155.0" || r.Header.Get("User-Agent") != wantUA {
+					if r.Header.Get("Version") != "0.164.0" || r.Header.Get("User-Agent") != wantUA {
 						t.Errorf("handshake identity: version=%q UA=%q", r.Header.Get("Version"), r.Header.Get("User-Agent"))
 					}
 					if r.Header.Get("Authorization") != "Bearer test-access" {
 						t.Error("identity normalization changed credential")
+					}
+					if r.Header.Get("Originator") != "codex-tui" || r.Header.Get("Session_id") == "" || r.Header.Get("Session-Id") != "" {
+						t.Error("identity upgrade changed WebSocket originator or session headers")
+					}
+					if test.wantSession != "" && r.Header.Get("Session_id") != test.wantSession {
+						t.Errorf("session = %q, want %q", r.Header.Get("Session_id"), test.wantSession)
+					}
+					if test.cacheKey != "" && r.Header.Get("Conversation_id") != test.cacheKey {
+						t.Error("identity upgrade lost the cache conversation header")
 					}
 					conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 					if err != nil {
@@ -1105,7 +1136,7 @@ func TestCodexWSSessionFixedIdentity(t *testing.T) {
 				session := wsTestSession(t, server.URL)
 				session.options.Headers = test.headers.Clone()
 				for turn := 0; turn < 2; turn++ {
-					payload := json.RawMessage(fmt.Sprintf(`{"model":%q,"input":"hello"}`, model))
+					payload := json.RawMessage(fmt.Sprintf(`{"model":%q,"input":"hello","prompt_cache_key":%q}`, model, test.cacheKey))
 					if turn == 1 {
 						payload = json.RawMessage(fmt.Sprintf(`{"model":%q,"input":"next","previous_response_id":"resp_fixed_0"}`, model))
 					}

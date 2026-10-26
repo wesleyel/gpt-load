@@ -35,6 +35,7 @@ type HomeAccessKey struct {
 }
 
 type HomeBase struct {
+	Concurrency      *ConcurrencyView         `json:"concurrency,omitempty"`
 	Inventory        HomeInventory            `json:"inventory"`
 	AccessKeys       []HomeAccessKey          `json:"access_keys"`
 	CurrentAccessKey *AccessKeyCollectionItem `json:"current_access_key"`
@@ -60,6 +61,7 @@ type homeCredentialRow struct {
 }
 
 type homeAccessKeyRow struct {
+	ConcurrencyLimit      *int64
 	KeyPrefix             string
 	PriceMultiplierMicros *int64
 	ID                    uint
@@ -72,6 +74,7 @@ type homeAccessKeyRow struct {
 	CreatedAtMS           int64
 	UpdatedAtMS           int64
 	LastRequestAtMS       *int64
+	RecordRequestBody     bool
 }
 
 type homeReadRows struct {
@@ -189,6 +192,9 @@ func (s *Service) readHomeBase(
 		Inventory:  inventory,
 		AccessKeys: accessKeys,
 	}
+	if accessKeyID == nil {
+		result.Concurrency = &ConcurrencyView{Current: s.manager.Concurrency().Snapshot().Global, Limit: snapshot.Settings.GlobalConcurrencyLimit}
+	}
 	if accessKeyID != nil {
 		current, err := mapHomeCurrentAccessKey(accessKeyRows[0], nowMS)
 		if err != nil {
@@ -201,6 +207,7 @@ func (s *Service) readHomeBase(
 				current.CostLimitRules = costLimitDefinitionsFromStatus(status)
 			}
 		}
+		s.fillAccessKeyConcurrency(&current.AccessKeyMetadata)
 		result.CurrentAccessKey = &current
 	}
 	return result, nil
@@ -256,9 +263,9 @@ func (s *Service) readHomeRows(
 		}
 		if err := tx.Model(&models.AccessKey{}).
 			Select(
-				"id", "name", "key_prefix", "key_suffix", "status", "filters", "rpm_limit", "price_multiplier_micros",
+				"id", "name", "key_prefix", "key_suffix", "status", "filters", "rpm_limit", "concurrency_limit", "price_multiplier_micros",
 				"expires_at_ms",
-				"created_at_ms", "updated_at_ms",
+				"created_at_ms", "updated_at_ms", "record_request_body",
 				"(SELECT MAX(request_logs.completed_at_ms) FROM request_logs WHERE request_logs.access_key_id = access_keys.id) AS last_request_at_ms",
 			).
 			Where("status = ?", state.AccessKeyStatusActive).
@@ -584,9 +591,10 @@ func mapHomeCurrentAccessKey(
 	metadata, err := mapAccessKeyMetadataRow(accessKeyMetadataRow{
 		PriceMultiplierMicros: row.PriceMultiplierMicros,
 		ID:                    row.ID, Name: row.Name, KeyPrefix: row.KeyPrefix, KeySuffix: row.KeySuffix,
-		Status: row.Status, Filters: row.Filters, RPMLimit: row.RPMLimit,
+		Status: row.Status, Filters: row.Filters, RPMLimit: row.RPMLimit, ConcurrencyLimit: row.ConcurrencyLimit,
 		ExpiresAtMS: row.ExpiresAtMS,
 		CreatedAtMS: row.CreatedAtMS, UpdatedAtMS: row.UpdatedAtMS,
+		RecordRequestBody: row.RecordRequestBody,
 	})
 	if err != nil {
 		return AccessKeyCollectionItem{}, err

@@ -1,3 +1,4 @@
+import { readConcurrency } from '@shared/concurrency'
 import { keepPreviousData, queryOptions } from '@tanstack/vue-query'
 import { computed, toValue, type MaybeRefOrGetter } from 'vue'
 
@@ -56,8 +57,10 @@ export interface CreateAccessKeyRequest {
   status: AccessKeyDto['status']
   filters: AccessKeyFiltersDto
   expires_at_ms: number | null
+  concurrency_limit: number | null
   rpm_limit: number
   price_multiplier: string
+  record_request_body: boolean
   cost_limit_rules: AccessKeyCostLimitRuleInput[]
 }
 
@@ -74,12 +77,16 @@ export type UpdateAccessKeyRequest = Partial<{
   status: AccessKeyDto['status']
   filters: AccessKeyFiltersDto
   expires_at_ms: number | null
+  concurrency_limit: number | null
   rpm_limit: number
   price_multiplier: string
+  record_request_body: boolean
   cost_limit_rules: AccessKeyCostLimitRuleInput[]
 }>
 
 const metadataFields = [
+  'concurrency_limit',
+  'concurrency',
   'id',
   'name',
   'masked_key',
@@ -88,6 +95,7 @@ const metadataFields = [
   'expires_at_ms',
   'rpm_limit',
   'price_multiplier',
+  'record_request_body',
   'cost_limit_rules',
   'cost_limit_status',
   'created_at_ms',
@@ -285,8 +293,14 @@ export function projectAccessKeyMetadata(value: unknown): AccessKeyDto {
     status: projectEnum(record.status, ['active', 'disabled'] as const),
     filters: projectFilters(record.filters),
     expires_at_ms: projectNullableEpochMilliseconds(record.expires_at_ms),
+    concurrency_limit:
+      record.concurrency_limit == null
+        ? null
+        : projectSafeInteger(record.concurrency_limit, { minimum: 0 }),
+    concurrency: readConcurrency(record.concurrency),
     rpm_limit: projectSafeInteger(record.rpm_limit, { minimum: 0 }),
     price_multiplier: projectPriceMultiplier(record.price_multiplier),
+    record_request_body: projectBoolean(record.record_request_body),
     cost_limit_rules: costLimitRules,
     cost_limit_status: costLimitStatus,
     created_at_ms: projectEpochMilliseconds(record.created_at_ms),

@@ -1,4 +1,5 @@
 import { codexLiveModes, type CodexLiveMode } from '@shared/codex-live'
+import { readErrorRules, type ErrorRule } from '@shared/error-rules'
 import { readRedactionRules, type RedactionRule } from './request-redaction'
 import {
   readJev,
@@ -42,6 +43,10 @@ import {
 } from './auto-model'
 
 export const runtimeSettingKeys = [
+  'error_rules',
+  'global_concurrency_limit',
+  'default_access_key_concurrency_limit',
+  'default_group_concurrency_limit',
   'codex_live_mode',
   'route_strategy',
   'first_byte_timeout',
@@ -69,8 +74,12 @@ export const runtimeSettingKeys = [
 export type RuntimeSettingKey = (typeof runtimeSettingKeys)[number]
 export type TimeoutSettingKey = Exclude<
   RuntimeSettingKey,
+  | 'error_rules'
   | 'codex_live_mode'
   | 'route_strategy'
+  | 'global_concurrency_limit'
+  | 'default_access_key_concurrency_limit'
+  | 'default_group_concurrency_limit'
   | 'retry_count'
   | 'blacklist_threshold'
   | 'header_rules'
@@ -87,8 +96,12 @@ export type TimeoutSettingKey = Exclude<
   | 'request_audit'
   | 'request_redaction'
 >
-export type PolicyCountSettingKey = 'retry_count' | 'blacklist_threshold'
-
+export type PolicyCountSettingKey =
+  | 'retry_count'
+  | 'blacklist_threshold'
+  | 'global_concurrency_limit'
+  | 'default_access_key_concurrency_limit'
+  | 'default_group_concurrency_limit'
 export interface CORSConfigDto {
   enabled: boolean
   allowed_origins: string[]
@@ -100,6 +113,7 @@ export interface CORSConfigDto {
 }
 
 export interface SettingsValues {
+  error_rules: ErrorRule[]
   request_redaction: RedactionRule[]
   jev: JevConfig
   request_audit: AuditConfig
@@ -109,6 +123,9 @@ export interface SettingsValues {
   first_byte_timeout: number
   request_timeout: number
   stream_idle_timeout: number
+  global_concurrency_limit: number
+  default_access_key_concurrency_limit: number
+  default_group_concurrency_limit: number
   retry_count: number
   blacklist_threshold: number
   header_rules: HeaderRulesDto
@@ -137,6 +154,7 @@ export interface SettingsDto {
 }
 
 export type SettingsPatch = Partial<{
+  error_rules: ErrorRule[] | null
   auto_model: AutoModelConfigDto | null
   jev: JevConfig | null
   request_redaction: RedactionRule[] | null
@@ -146,6 +164,9 @@ export type SettingsPatch = Partial<{
   first_byte_timeout: number | null
   request_timeout: number | null
   stream_idle_timeout: number | null
+  global_concurrency_limit: number | null
+  default_access_key_concurrency_limit: number | null
+  default_group_concurrency_limit: number | null
   retry_count: number | null
   blacklist_threshold: number | null
   header_rules: HeaderRulesDto | null
@@ -260,6 +281,7 @@ export function projectSettings(value: unknown): SettingsDto {
     audit_access_keys: readAuditAccessKeys(record.audit_access_keys),
     request_audit_preset: readAudit(record.request_audit_preset),
     values: {
+      error_rules: readErrorRules(values.error_rules ?? []),
       auto_model: projectAutoModel(values.auto_model),
       jev: readJev(values.jev),
       request_audit: readAudit(values.request_audit),
@@ -269,6 +291,14 @@ export function projectSettings(value: unknown): SettingsDto {
       first_byte_timeout: projectSafeInteger(values.first_byte_timeout, { minimum: 1 }),
       request_timeout: projectSafeInteger(values.request_timeout, { minimum: 1 }),
       stream_idle_timeout: projectSafeInteger(values.stream_idle_timeout, { minimum: 1 }),
+      global_concurrency_limit: projectSafeInteger(values.global_concurrency_limit, { minimum: 0 }),
+      default_access_key_concurrency_limit: projectSafeInteger(
+        values.default_access_key_concurrency_limit,
+        { minimum: 0 },
+      ),
+      default_group_concurrency_limit: projectSafeInteger(values.default_group_concurrency_limit, {
+        minimum: 0,
+      }),
       retry_count: projectSafeInteger(values.retry_count, { minimum: 0 }),
       blacklist_threshold: projectSafeInteger(values.blacklist_threshold, { minimum: 0 }),
       header_rules: projectHeaderRules(values.header_rules),

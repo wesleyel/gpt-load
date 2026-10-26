@@ -12,14 +12,14 @@ import (
 	"time"
 	"unicode/utf8"
 
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	internalexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	internalexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -137,7 +137,8 @@ func NewAntigravityAuth(_ string, credential AntigravityCredential, baseURL stri
 	return &cliproxyauth.Auth{
 		Provider: ProviderAntigravity,
 		Attributes: map[string]string{
-			"base_url": strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+			"base_url":   strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+			"user_agent": antigravityUserAgent,
 		},
 		Metadata: map[string]any{
 			"type":         ProviderAntigravity,
@@ -181,11 +182,15 @@ func (executor *antigravityHTTPExecutor) ExecuteCanonical(
 		Model: request.Model, Payload: append([]byte(nil), request.Payload...), Format: format,
 	}, antigravityExecutorOptions(request, format, false))
 	if err != nil {
-		return ExecuteResponse{Headers: observation.responseHeaders(), AppliedReasoningEffort: observation.reasoningEffort()}, normalizeAntigravityExecutionError(err)
+		return ExecuteResponse{Headers: observation.responseHeaders(), AppliedReasoningEffort: observation.reasoningEffort(),
+			AppliedReasoningMode:         observation.reasoningMode(),
+			AppliedReasoningBudgetTokens: observation.reasoningBudgetTokens()}, normalizeAntigravityExecutionError(err)
 	}
 	return ExecuteResponse{
 		Payload: normalizeAntigravityConvertedUsage(request.Format, false, response.Payload), Headers: response.Headers.Clone(),
-		AppliedReasoningEffort: observation.reasoningEffort(),
+		AppliedReasoningEffort:       observation.reasoningEffort(),
+		AppliedReasoningMode:         observation.reasoningMode(),
+		AppliedReasoningBudgetTokens: observation.reasoningBudgetTokens(),
 	}, nil
 }
 
@@ -255,7 +260,9 @@ func (executor *antigravityHTTPExecutor) ExecuteStreamCanonical(
 		Model: request.Model, Payload: append([]byte(nil), request.Payload...), Format: format,
 	}, antigravityExecutorOptions(request, format, true))
 	if err != nil {
-		return &ExecuteStreamResponse{Headers: observation.responseHeaders(), AppliedReasoningEffort: observation.reasoningEffort()}, normalizeAntigravityExecutionError(err)
+		return &ExecuteStreamResponse{Headers: observation.responseHeaders(), AppliedReasoningEffort: observation.reasoningEffort(),
+			AppliedReasoningMode:         observation.reasoningMode(),
+			AppliedReasoningBudgetTokens: observation.reasoningBudgetTokens()}, normalizeAntigravityExecutionError(err)
 	}
 	chunks := make(chan ExecuteStreamChunk)
 	go func() {
@@ -274,6 +281,8 @@ func (executor *antigravityHTTPExecutor) ExecuteStreamCanonical(
 	}()
 	return &ExecuteStreamResponse{
 		Headers: response.Headers.Clone(), Chunks: chunks, AppliedReasoningEffort: observation.reasoningEffort(),
+		AppliedReasoningMode:         observation.reasoningMode(),
+		AppliedReasoningBudgetTokens: observation.reasoningBudgetTokens(),
 	}, nil
 }
 
@@ -330,6 +339,7 @@ func stripAntigravityReplayHeaders(headers http.Header) {
 	for name := range headers {
 		switch {
 		case strings.EqualFold(name, "Session-Id"),
+			strings.EqualFold(name, "Session_id"),
 			strings.EqualFold(name, "X-Claude-Code-Session-Id"),
 			strings.EqualFold(name, "X-Claude-Code-Agent-Id"):
 			delete(headers, name)
@@ -341,12 +351,6 @@ func normalizeAntigravityConvertedUsage(format string, stream bool, raw []byte) 
 	result := append([]byte(nil), raw...)
 	format = strings.TrimSpace(format)
 	switch format {
-	case "openai":
-		// CPA 的 Chat 流式转换仍单独报告思考 tokens；非流式及 Responses 已计入输出总数。
-		if stream {
-			return addAntigravityUsageIntegers(result, "usage.completion_tokens", "usage.completion_tokens_details.reasoning_tokens")
-		}
-		return result
 	case "claude":
 		if stream {
 			return result
@@ -355,20 +359,6 @@ func normalizeAntigravityConvertedUsage(format string, stream bool, raw []byte) 
 	default:
 		return result
 	}
-}
-
-func addAntigravityUsageIntegers(raw []byte, totalPath, extraPath string) []byte {
-	total, totalOK := antigravityUsageInteger(raw, totalPath)
-	extra, extraOK := antigravityUsageInteger(raw, extraPath)
-	if !totalOK || !extraOK || extra > 0 && total > int64(^uint64(0)>>1)-extra {
-		return raw
-	}
-	updated, err := sjson.SetBytes(raw, totalPath, total+extra)
-	if err != nil {
-		return raw
-	}
-	clear(raw)
-	return updated
 }
 
 func subtractAntigravityUsageIntegers(raw []byte, totalPath, cachedPath string) []byte {

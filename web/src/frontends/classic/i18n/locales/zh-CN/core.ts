@@ -1,4 +1,19 @@
+import { errorRuleMessages } from '@shared/error-rule-messages'
+import { zhCN as proxies } from '@shared/proxies/messages'
 export default {
+  errorRules: errorRuleMessages['zh-CN'],
+  proxies,
+  concurrency: {
+    label: '并发上限',
+    value: '并发 {current} / {limit}',
+    inherit: '继承默认值',
+    unlimited: '不限',
+    overrideHelp: '留空继承默认值；0 表示不限。满额立即拒绝。',
+    limitHelp: '0 表示不限。仅限制数据面并发，满额立即拒绝。',
+    global_concurrency_limit: '全局并发上限',
+    default_access_key_concurrency_limit: '访问密钥默认并发上限',
+    default_group_concurrency_limit: '分组默认并发上限',
+  },
   common: {
     upstreamUrl: {
       label: '自定义上游地址',
@@ -100,6 +115,7 @@ export default {
       refreshTemporarilyUnavailable: '凭据刷新暂时失败，请稍后重试',
       versionConflict: '账号授权已被其他操作更新，请重新加载后再试',
       resetCreditUnavailable: '当前没有可用的重置卡，请先同步账号信息',
+      resetCreditPreparationFailed: '重置准备失败，尚未使用重置卡，请稍后重试',
       resetCreditRejected: '上游未能使用重置卡，请同步后再试',
       resetCreditOutcomeUnknown:
         '无法确认重置结果；请不要刷新页面，直接再次确认以复用同一操作标识安全重试',
@@ -202,6 +218,8 @@ export default {
     preferences: '偏好设置',
     accessKeyReadOnly: '访问密钥 · 只读',
     accessKeyReadOnlyDescription: '当前使用访问密钥登录；页面和数据仅限此密钥，不能修改系统配置。',
+    requestBodyRecordingNotice:
+      '管理员已为这个访问密钥开启请求内容记录。你通过它发送的内容会保存 {days} 天，管理员和持有这个密钥的人都可以查看。不希望被记录的内容，请不要通过这个密钥发送。',
     language: '语言',
     theme: '主题',
     localeZh: '简体中文',

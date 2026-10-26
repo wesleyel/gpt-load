@@ -103,6 +103,7 @@ func nativeRouteImplemented(
 		case protocol.OpenAIResponses:
 			return operation == execution.OperationResponsesCreate ||
 				operation == execution.OperationProbe ||
+				operation == execution.OperationWebSearch ||
 				nativeResponsesLifecycleOperation(operation)
 		case protocol.OpenAIImages:
 			return operation == execution.OperationImagesGenerate ||
@@ -119,6 +120,9 @@ func nativeRouteImplemented(
 			return false
 		}
 	case channel.ProviderOpenAICompatible:
+		if clientProtocol == protocol.Mistral {
+			return mistralNativeOperation(operation)
+		}
 		if clientProtocol == protocol.OpenAIEmbeddings {
 			return operation == execution.OperationEmbeddingsCreate || operation == execution.OperationProbe
 		}
@@ -147,6 +151,23 @@ func nativeRouteImplemented(
 	case channel.ProviderGoogleVertex:
 		return clientProtocol == protocol.Gemini &&
 			(operation == execution.OperationChatCompletion || operation == execution.OperationProbe)
+	default:
+		return false
+	}
+}
+
+func mistralNativeOperation(operation execution.Operation) bool {
+	switch operation {
+	case execution.OperationMistralOCR,
+		execution.OperationMistralFIM,
+		execution.OperationMistralAudioTranscription,
+		execution.OperationMistralAudioSpeech,
+		execution.OperationMistralModeration,
+		execution.OperationMistralChatModeration,
+		execution.OperationMistralClassification,
+		execution.OperationMistralVoices,
+		execution.OperationMistralRealtimeTranscription:
+		return true
 	default:
 		return false
 	}

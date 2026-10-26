@@ -1,3 +1,4 @@
+import { readConcurrency, type ConcurrencyView } from '@shared/concurrency'
 import type { ApiClient } from '@shared/http/client'
 import { InvalidResponseError } from '@shared/http/errors'
 import { boolean, integer, list, oneOf, record, text } from './response'
@@ -26,14 +27,17 @@ export interface CostWindow extends CostRule {
   window_ends_at_ms: number | null
 }
 export interface AccessKey {
+  concurrency: ConcurrencyView
   id: number
   name: string
   masked_key: string
   status: 'active' | 'disabled'
   filters: AccessScope
   expires_at_ms: number | null
+  concurrency_limit: number | null
   rpm_limit: number
   price_multiplier: string
+  record_request_body: boolean
   cost_limit_rules: CostRule[]
   cost_limit_status: {
     allowed: boolean
@@ -72,8 +76,10 @@ export interface AccessInput {
   status: AccessKey['status']
   filters: AccessScope
   expires_at_ms: number | null
+  concurrency_limit: number | null
   rpm_limit: number
   price_multiplier: string
+  record_request_body: boolean
   cost_limit_rules: CostRule[]
 }
 export const accessKeysKey = ['modern', 'access-keys'] as const
@@ -122,8 +128,11 @@ function readAccessKey(value: unknown): AccessKey {
       allowed_cidrs: list(scope.allowed_cidrs).map(text),
     },
     expires_at_ms: timestamp(row.expires_at_ms),
+    concurrency_limit: row.concurrency_limit == null ? null : integer(row.concurrency_limit),
+    concurrency: readConcurrency(row.concurrency),
     rpm_limit: integer(row.rpm_limit),
     price_multiplier: decimal(row.price_multiplier),
+    record_request_body: boolean(row.record_request_body),
     cost_limit_rules: list(row.cost_limit_rules).map(readRule),
     cost_limit_status: runtime
       ? {

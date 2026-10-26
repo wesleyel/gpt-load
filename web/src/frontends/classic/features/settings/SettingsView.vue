@@ -209,7 +209,13 @@ const invalidKeys = computed<RuntimeSettingKey[]>(() => {
       return !isValidRetention(current.values.request_log_retention_days)
     if (key === 'affinity_capacity')
       return !isValidAffinityCapacity(current.values.affinity_capacity)
-    if (key === 'retry_count' || key === 'blacklist_threshold')
+    if (
+      key === 'retry_count' ||
+      key === 'blacklist_threshold' ||
+      key === 'global_concurrency_limit' ||
+      key === 'default_access_key_concurrency_limit' ||
+      key === 'default_group_concurrency_limit'
+    )
       return !isValidNonNegativeInteger(current.values[key])
     return false
   })
@@ -323,6 +329,7 @@ function confirmDiscard(): void {
 }
 
 function settingLabel(key: RuntimeSettingKey): string {
+  if (key === 'error_rules') return t('errorRules.title')
   if (key === 'request_redaction') return t('requestRedaction.title')
   if (key === 'jev') return t('jev.title')
   if (key === 'request_audit') return t('requestAudit.title')
@@ -337,6 +344,7 @@ function settingLabel(key: RuntimeSettingKey): string {
 }
 
 function settingTarget(key: RuntimeSettingKey): string {
+  if (key === 'error_rules') return 'settings-routing'
   if (key === 'request_redaction') return 'settings-redaction'
   if (['auto_model', 'jev', 'request_audit'].includes(key)) return 'settings-experimental'
   if (key === 'header_rules' || key === 'cors' || key === 'response_header_rules')
@@ -353,10 +361,14 @@ function sectionForKey(key: RuntimeSettingKey): SettingsSection {
     key === 'route_strategy' ||
     key === 'affinity_enabled' ||
     key === 'affinity_ttl' ||
-    key === 'affinity_capacity'
+    key === 'affinity_capacity' ||
+    key === 'error_rules'
   )
     return 'routing'
   if (
+    key === 'global_concurrency_limit' ||
+    key === 'default_access_key_concurrency_limit' ||
+    key === 'default_group_concurrency_limit' ||
     key === 'first_byte_timeout' ||
     key === 'request_timeout' ||
     key === 'stream_idle_timeout' ||

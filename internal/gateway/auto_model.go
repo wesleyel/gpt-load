@@ -105,7 +105,7 @@ func (handler *Handler) prepareAutoModel(ctx context.Context, snapshot *state.Co
 		if err != nil {
 			return parsed, metadata, nil, &reasonRedactionFailed
 		}
-		clean, err := redactOutboundRequest(snapshot.RequestRedaction, selectedDialect.Protocol(), parsed, cipher)
+		clean, err := redactOutboundRequest(snapshot.RequestRedaction, selectedDialect.Protocol(), parsed, handler.RequestBodyLimit(), cipher)
 		if err != nil {
 			return parsed, metadata, nil, &reasonRedactionFailed
 		}
@@ -214,6 +214,9 @@ func (handler *Handler) prepareAutoModel(ctx context.Context, snapshot *state.Co
 				result = handler.executeAutoDecision(ctx, snapshot, key, presets, view)
 			}
 			decision = &result
+			if result.Reason == reasonConcurrencyLimit.Code {
+				return parsed, metadata, decision, &reasonConcurrencyLimit
+			}
 			if result.Status == "selected" {
 				for _, preset := range presets {
 					if preset.ID == result.Choice {
@@ -238,10 +241,15 @@ func (handler *Handler) prepareAutoModel(ctx context.Context, snapshot *state.Co
 	if err != nil {
 		return parsed, metadata, decision, &reasonInvalidProtocolRequest
 	}
-	body, _, err := chosen.Rules.Apply(selectedDialect.Protocol(), metadata.Operation, chosen.Model, rewritten.Body)
-	if err != nil || int64(len(body)) > maxRequestBodyBytes {
+	bodyLimit := handler.RequestBodyLimit()
+	if query.ResponsesWebsocket != nil {
+		bodyLimit = maxWebsocketPayloadBytes
+	}
+	body, _, err := chosen.Rules.ApplyWithLimit(selectedDialect.Protocol(), metadata.Operation, chosen.Model, rewritten.Body, bodyLimit)
+	if err != nil || int64(len(body)) > bodyLimit {
 		return parsed, metadata, decision, &reasonParameterOverrideUnavailable
 	}
+	decision.RemovedParameterPaths = chosen.Rules.RemovedPaths(selectedDialect.Protocol(), metadata.Operation, chosen.Model)
 	rewritten.Body = body
 	updated, err := selectedDialect.InspectRequest(rewritten)
 	if err != nil {
@@ -312,6 +320,7 @@ func (recorder *requestRecorder) autoLogDecision() *automodel.Decision {
 		return nil
 	}
 	copy := *recorder.autoDecision
+	copy.RemovedParameterPaths = nil
 	copy.Selection.ParameterOverrides = nil
 	copy.Selection.TaskFingerprint = ""
 	return &copy

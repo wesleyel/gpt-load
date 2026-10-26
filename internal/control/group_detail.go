@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"gpt-load/internal/channel"
+	"gpt-load/internal/health"
 	"gpt-load/internal/platform/config"
 	app_errors "gpt-load/internal/platform/errors"
 	"gpt-load/internal/state"
@@ -15,6 +16,8 @@ import (
 )
 
 type GroupEffectiveConfigResponse struct {
+	ErrorRules                []health.ErrorRule  `json:"error_rules"`
+	ConcurrencyLimit          int64               `json:"concurrency_limit"`
 	FirstByteTimeout          int64               `json:"first_byte_timeout"`
 	RequestTimeout            int64               `json:"request_timeout"`
 	StreamIdleTimeout         int64               `json:"stream_idle_timeout"`
@@ -81,6 +84,7 @@ func effectiveGroupConfig(
 		set[name] = value
 	}
 	return GroupEffectiveConfigResponse{
+		ErrorRules:        resolved.ErrorRules.Rules(),
 		FirstByteTimeout:  durationSeconds(resolved.Timeouts.FirstByte),
 		RequestTimeout:    durationSeconds(resolved.Timeouts.Request),
 		StreamIdleTimeout: durationSeconds(resolved.Timeouts.StreamIdle),
@@ -93,6 +97,7 @@ func effectiveGroupConfig(
 		CodexLiveMode:             resolved.CodexLiveMode,
 		ResponsesWebsocketEnabled: resolved.ResponsesWebsocketEnabled,
 		EmptyResponseRetry:        resolved.EmptyResponseRetry,
+		ConcurrencyLimit:          resolved.ConcurrencyLimit,
 	}, nil
 }
 

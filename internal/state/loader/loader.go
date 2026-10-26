@@ -76,6 +76,7 @@ func NewWithCredentialValidation(
 }
 
 type compileRows struct {
+	proxies              []models.Proxy
 	settings             []models.SystemSetting
 	groups               []models.Group
 	credentials          []models.Credential
@@ -146,6 +147,9 @@ func NewWithAccessQuota(
 }
 
 func (l *Loader) Load(ctx context.Context) error {
+	if err := MigrateLegacyProxyOverrides(ctx, l.db, l.encryption); err != nil {
+		return fmt.Errorf("migrate proxy configuration: %w", err)
+	}
 	if err := l.migrateLegacyAutoModel(ctx); err != nil {
 		return fmt.Errorf("migrate automatic model configuration: %w", err)
 	}
@@ -291,6 +295,9 @@ func (l *Loader) validatePersistedCredentials(
 func queryCompileRows(ctx context.Context, db *gorm.DB) (compileRows, error) {
 	db = db.WithContext(ctx)
 	var rows compileRows
+	if err := db.Order("id ASC").Find(&rows.proxies).Error; err != nil {
+		return compileRows{}, fmt.Errorf("query proxy catalog: %w", err)
+	}
 	if err := db.
 		Order(clause.OrderBy{Columns: []clause.OrderByColumn{{Column: clause.Column{Name: "key"}}}}).
 		Find(&rows.settings).Error; err != nil {
@@ -306,7 +313,7 @@ func queryCompileRows(ctx context.Context, db *gorm.DB) (compileRows, error) {
 		return compileRows{}, fmt.Errorf("query credential metadata: %w", err)
 	}
 	if err := db.
-		Select("id", "name", "key_hash", "key_prefix", "key_suffix", "status", "filters", "rpm_limit", "expires_at_ms", "price_multiplier_micros").
+		Select("id", "name", "key_hash", "key_prefix", "key_suffix", "status", "filters", "rpm_limit", "concurrency_limit", "expires_at_ms", "price_multiplier_micros", "record_request_body").
 		Order("id ASC").
 		Find(&rows.accessKeys).Error; err != nil {
 		return compileRows{}, fmt.Errorf("query access keys: %w", err)
@@ -436,7 +443,7 @@ func BuildGroupCredentialEntriesWithProxy(
 		Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("query group %d credentials: %w", groupID, err)
 	}
-	entries, err := mapCredentialsWithProxy(rows, []models.Group{group}, encryptionService)
+	entries, err := mapCredentialsWithProxyDB(ctx, db, rows, []models.Group{group}, encryptionService)
 	if err != nil {
 		return nil, fmt.Errorf("map group %d credentials: %w", groupID, err)
 	}
@@ -486,7 +493,7 @@ func BuildCredentialEntriesWithProxy(
 	if err != nil {
 		return nil, err
 	}
-	entries, err := mapCredentialsWithProxy(rows, groups, encryptionService)
+	entries, err := mapCredentialsWithProxyDB(ctx, db, rows, groups, encryptionService)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +528,7 @@ func (l *Loader) read(
 	if err != nil {
 		return state.CompileInput{}, nil, nil, err
 	}
-	entries, err := mapCredentialsWithProxy(credentials, rows.groups, l.encryption)
+	entries, err := mapCredentialsWithProxyDB(ctx, l.db, credentials, rows.groups, l.encryption)
 	if err != nil {
 		return state.CompileInput{}, nil, nil, err
 	}
@@ -621,7 +628,11 @@ func LoadSystemSettingsAndProxy(
 		if err != nil {
 			return nil, nil, fmt.Errorf("decode global proxy config: %w", err)
 		}
-		return settings, proxyConfig, nil
+		catalog, err := LoadProxyCatalog(ctx, db, encryptionService)
+		if err != nil {
+			return nil, nil, err
+		}
+		return settings, catalog.Resolve(proxyConfig), nil
 	}
 	return settings, nil, nil
 }
@@ -647,6 +658,10 @@ func mapSystemAndGroups(
 	encryptionService encryption.Service,
 	environmentProxy *outboundproxy.Config,
 ) (state.CompileInput, error) {
+	proxyCatalog, err := buildProxyCatalog(rows.proxies, encryptionService)
+	if err != nil {
+		return state.CompileInput{}, err
+	}
 	input := state.CompileInput{
 		SystemSettings:       make(config.Settings, len(rows.settings)),
 		Groups:               make([]state.GroupConfig, 0, len(rows.groups)),
@@ -657,17 +672,25 @@ func mapSystemAndGroups(
 		if models.ClientModelHash(row.ClientModel) != row.ModelHash {
 			return state.CompileInput{}, fmt.Errorf("client model override has invalid identity")
 		}
-		var overrides catalog.ClientModelOverrides
+		var persisted struct {
+			catalog.ClientModelOverrides
+			// 读取旧版配置时忽略已移除的默认档位，其余字段仍严格校验。
+			RetiredDefaultServiceTier *string `json:"default_service_tier"`
+		}
 		canonical, err := canonicaljson.Canonicalize(row.Overrides)
 		if err != nil {
 			return state.CompileInput{}, fmt.Errorf("decode client model override %q: %w", row.ClientModel, err)
 		}
-		if err := decodeJSONDocument(models.JSON(canonical), &overrides, true); err != nil {
+		if err := decodeJSONDocument(models.JSON(canonical), &persisted, true); err != nil {
 			return state.CompileInput{}, fmt.Errorf("decode client model override %q: %w", row.ClientModel, err)
 		}
+		overrides := persisted.ClientModelOverrides
 		if err := overrides.Validate(); err != nil || overrides.IsEmpty() {
 			if err != nil {
 				return state.CompileInput{}, fmt.Errorf("validate client model override %q: %w", row.ClientModel, err)
+			}
+			if persisted.RetiredDefaultServiceTier != nil {
+				continue
 			}
 			return state.CompileInput{}, fmt.Errorf("client model override %q is empty", row.ClientModel)
 		}
@@ -734,7 +757,7 @@ func mapSystemAndGroups(
 			if err != nil {
 				return state.CompileInput{}, fmt.Errorf("decode global proxy config: %w", err)
 			}
-			input.GlobalProxy = config
+			input.GlobalProxy = proxyCatalog.Resolve(config)
 			continue
 		}
 		if isIgnoredSystemSetting(row.Key) {
@@ -779,6 +802,7 @@ func mapSystemAndGroups(
 			ValidationModel:    validationModel,
 			Models:             runtimeModels,
 			Settings:           settings,
+			Priority:           row.Priority,
 			WeightManual:       cloneWeight(row.WeightManual),
 			Enabled:            row.Enabled,
 		}
@@ -787,7 +811,7 @@ func mapSystemAndGroups(
 			if err != nil {
 				return state.CompileInput{}, fmt.Errorf("decode group %d proxy config: %w", row.ID, err)
 			}
-			group.Proxy = proxy
+			group.Proxy = proxyCatalog.Resolve(proxy)
 		}
 		input.Groups = append(input.Groups, group)
 	}
@@ -844,9 +868,10 @@ func mapAccessKeys(
 		result = append(result, state.AccessKeyConfig{
 			PriceMultiplier: &multiplier,
 			ID:              row.ID, Name: row.Name, KeyHash: row.KeyHash, KeyPrefix: *row.KeyPrefix, KeySuffix: row.KeySuffix,
-			Status: state.AccessKeyStatus(row.Status), Filters: filters.toState(), RPMLimit: row.RPMLimit,
+			Status: state.AccessKeyStatus(row.Status), Filters: filters.toState(), RPMLimit: row.RPMLimit, ConcurrencyLimit: row.ConcurrencyLimit,
 			ExpiresAtMS: cloneInt64Pointer(row.ExpiresAtMS), AllowedPeerCIDRs: allowedPeerCIDRs,
-			CostLimitRules: append([]accessquota.Rule(nil), rulesByAccessKey[row.ID]...),
+			CostLimitRules:    append([]accessquota.Rule(nil), rulesByAccessKey[row.ID]...),
+			RecordRequestBody: row.RecordRequestBody,
 		})
 	}
 	return result, nil
@@ -920,7 +945,8 @@ func mapCredentials(rows []models.Credential, groups []models.Group) []state.Cre
 	for _, row := range rows {
 		target := targets[row.GroupID]
 		result = append(result, state.CredentialEntry{
-			ID: row.ID, GroupID: row.GroupID,
+			Name: row.Name,
+			ID:   row.ID, GroupID: row.GroupID,
 			Version: credentialVersion(row.SecretVersion),
 			IdentityGeneration: CredentialIdentityGeneration(
 				row.IdentityFingerprint,
@@ -935,12 +961,18 @@ func mapCredentials(rows []models.Credential, groups []models.Group) []state.Cre
 	return result
 }
 
-func mapCredentialsWithProxy(
+func mapCredentialsWithProxyDB(
+	ctx context.Context,
+	db *gorm.DB,
 	rows []models.Credential,
 	groups []models.Group,
 	encryptionService encryption.Service,
 ) ([]state.CredentialEntry, error) {
 	entries := mapCredentials(rows, groups)
+	catalog, err := LoadProxyCatalog(ctx, db, encryptionService)
+	if err != nil {
+		return nil, err
+	}
 	for index, row := range rows {
 		if row.ProxyConfig == nil {
 			continue
@@ -956,6 +988,13 @@ func mapCredentialsWithProxy(
 		if err != nil || config.Mode == outboundproxy.ModeInherit {
 			plaintext = ""
 			return nil, fmt.Errorf("validate credential %d proxy config", row.ID)
+		}
+		if config.ProxyID != 0 {
+			if managed, exists := catalog[config.ProxyID]; exists && managed.Row.Enabled {
+				entries[index].EncryptedProxy = managed.Row.Config
+				entries[index].ProxyFingerprint = managed.RuntimeFingerprint
+			}
+			continue
 		}
 		entries[index].EncryptedProxy = *row.ProxyConfig
 		entries[index].ProxyFingerprint = encryptionService.Hash(plaintext)

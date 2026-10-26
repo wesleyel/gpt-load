@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	cpaembedded "github.com/router-for-me/CLIProxyAPI/v7/gptload-embedded/embedded"
+	cpaembedded "github.com/router-for-me/CLIProxyAPI/v8/gptload-embedded/embedded"
 
 	"gpt-load/internal/channel/modules"
 	"gpt-load/internal/channel/spec"
@@ -195,7 +195,7 @@ func (*codexDriver) Observe(ctx context.Context, credential subscriptionruntime.
 
 // Consume redeems one Codex reset credit against the resolved target using the
 // caller's durable request identity.
-func (*codexDriver) Consume(ctx context.Context, credential subscriptionruntime.Credential, target subscriptionruntime.Target, requestID string) (subscriptionruntime.ResetCreditResult, error) {
+func (*codexDriver) Consume(ctx context.Context, credential subscriptionruntime.Credential, target subscriptionruntime.Target, request subscriptionruntime.ResetCreditRequest) (subscriptionruntime.ResetCreditResult, error) {
 	value, err := ParseCredentialJSON(credential.Canonical())
 	if err != nil {
 		return subscriptionruntime.ResetCreditResult{}, err
@@ -204,7 +204,7 @@ func (*codexDriver) Consume(ctx context.Context, credential subscriptionruntime.
 	if err != nil {
 		return subscriptionruntime.ResetCreditResult{}, err
 	}
-	result, err := ConsumeResetCredit(ctx, value, baseURL, requestID)
+	result, err := ConsumeResetCredit(ctx, value, baseURL, request.ID)
 	if err != nil {
 		var upstream *UpstreamHTTPError
 		if errors.As(err, &upstream) {
@@ -262,7 +262,7 @@ func (codexResetCreditAction) ID() spec.ActionID { return modules.CodexResetCred
 
 func codexRuntimeCredential(value Credential, canonical []byte) subscriptionruntime.Credential {
 	expiresAt, expires := CredentialExpiresAt(value)
-	account := subscriptionruntime.Account{Email: strings.TrimSpace(value.Email), ExpiresAt: expiresAt, ExpiresAtKnown: expires}
+	account := subscriptionruntime.Account{PlanType: cpaembedded.CodexCredentialPlan(credentialToBridge(value)), Email: strings.TrimSpace(value.Email), ExpiresAt: expiresAt, ExpiresAtKnown: expires}
 	if refreshed, err := time.Parse(time.RFC3339, strings.TrimSpace(value.LastRefresh)); err == nil {
 		account.LastRefresh, account.LastRefreshKnown = refreshed, true
 	}

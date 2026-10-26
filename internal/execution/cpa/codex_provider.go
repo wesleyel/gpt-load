@@ -30,7 +30,8 @@ type codexProviderBridge struct {
 }
 
 type codexBootstrapRejectionError struct {
-	cause error
+	cause    error
+	inStream bool
 }
 
 func (err *codexBootstrapRejectionError) Error() string { return err.cause.Error() }
@@ -116,7 +117,9 @@ func (bridge *codexProviderBridge) CountTokensLocal(
 	headers.Set(localTokenCountHeader, "local-estimate")
 	return providerResponse{
 		Payload: append([]byte(nil), response.Payload...), Headers: headers,
-		AppliedReasoningEffort: response.AppliedReasoningEffort,
+		AppliedReasoningEffort:       response.AppliedReasoningEffort,
+		AppliedReasoningMode:         response.AppliedReasoningMode,
+		AppliedReasoningBudgetTokens: response.AppliedReasoningBudgetTokens,
 	}, err
 }
 
@@ -318,10 +321,13 @@ func (bridge *codexProviderBridge) Execute(
 	return providerResponse{
 		StatusCode: response.StatusCode,
 		Payload:    append([]byte(nil), response.Payload...), Headers: response.Headers.Clone(),
-		AppliedReasoningEffort: response.AppliedReasoningEffort,
-		UpstreamProtocol:       codexUpstreamProtocol(response.UpstreamRequestPath),
-		QuotaObservedAt:        response.QuotaObservedAt,
-		QuotaWindows:           codex.NormalizePassiveQuotaWindows(response.QuotaSignals, response.QuotaObservedAt),
+		AppliedReasoningEffort:       response.AppliedReasoningEffort,
+		AppliedReasoningMode:         response.AppliedReasoningMode,
+		AppliedReasoningBudgetTokens: response.AppliedReasoningBudgetTokens,
+		UpstreamProtocol:             codexUpstreamProtocol(response.UpstreamRequestPath),
+		QuotaObservedAt:              response.QuotaObservedAt,
+		QuotaWindows:                 codex.NormalizePassiveQuotaWindows(response.QuotaSignals, response.QuotaObservedAt),
+		Credits:                      codex.NormalizePassiveCredits(response.QuotaSignals, response.QuotaObservedAt),
 	}, err
 }
 
@@ -349,11 +355,14 @@ func (bridge *codexProviderBridge) ExecuteStream(
 		return nil, err
 	}
 	convertedResponse := &providerStreamResponse{
-		Headers:                response.Headers.Clone(),
-		AppliedReasoningEffort: response.AppliedReasoningEffort,
-		UpstreamProtocol:       codexUpstreamProtocol(response.UpstreamRequestPath),
-		QuotaObservedAt:        response.QuotaObservedAt,
-		QuotaWindows:           codex.NormalizePassiveQuotaWindows(response.QuotaSignals, response.QuotaObservedAt),
+		Headers:                      response.Headers.Clone(),
+		AppliedReasoningEffort:       response.AppliedReasoningEffort,
+		AppliedReasoningMode:         response.AppliedReasoningMode,
+		AppliedReasoningBudgetTokens: response.AppliedReasoningBudgetTokens,
+		UpstreamProtocol:             codexUpstreamProtocol(response.UpstreamRequestPath),
+		QuotaObservedAt:              response.QuotaObservedAt,
+		QuotaWindows:                 codex.NormalizePassiveQuotaWindows(response.QuotaSignals, response.QuotaObservedAt),
+		Credits:                      codex.NormalizePassiveCredits(response.QuotaSignals, response.QuotaObservedAt),
 	}
 	if err != nil {
 		if codexBootstrapCapacityRejection(err) {
@@ -406,6 +415,9 @@ func (*codexProviderBridge) ClassifyError(
 	typeValue, codeValue := codexErrorTypeCode(err)
 	var bootstrapRejection *codexBootstrapRejectionError
 	isBootstrapRejection := errors.As(err, &bootstrapRejection)
+	if isBootstrapRejection && bootstrapRejection.inStream && codexBootstrapOverloadMessage(err) {
+		status, kind, codeValue = http.StatusServiceUnavailable, execution.ErrorKindHTTP, "server_is_overloaded"
+	}
 	evidence := &execution.ErrorEvidence{
 		Kind: kind, StatusCode: status, Type: typeValue, Code: codeValue,
 		Summary: safeErrorSummary(err, credential.redactionValues()),
@@ -450,9 +462,15 @@ func codexBootstrapCapacityRejection(err error) bool {
 	if codexBootstrapOverload(codeValue) || codexBootstrapRateLimit(codeValue) || codexModelCapacityError(err) {
 		return true
 	}
-	// 仅在 ExecuteStream 返回首包前错误时调用；普通 server_error 不提供重试证据。
+	// 只用于尚未交付输出的容量拒绝；普通 server_error 不提供重试证据。
 	return (strings.EqualFold(typeValue, "server_error") || strings.EqualFold(codeValue, "server_error")) &&
-		strings.Contains(strings.ToLower(err.Error()), "you can retry your request")
+		(strings.Contains(strings.ToLower(err.Error()), "you can retry your request") || codexBootstrapOverloadMessage(err))
+}
+
+func codexBootstrapOverloadMessage(err error) bool {
+	typeValue, codeValue := codexErrorTypeCode(err)
+	return (strings.EqualFold(typeValue, "server_error") || strings.EqualFold(codeValue, "server_error")) &&
+		strings.Contains(strings.ToLower(err.Error()), "our servers are currently overloaded")
 }
 
 func codexBootstrapOverload(codeValue string) bool {

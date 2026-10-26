@@ -100,12 +100,14 @@ func TestCodexLiveFailedSetupRetainsKnownUpstreamForCleanup(t *testing.T) {
 	handler, engine, sink, _, _ := liveGatewayFixture(t, fake)
 	setLiveGroupMode(handler, 1, state.CodexLiveDirect)
 	handler.liveOpener = liveSetupFailureOpener{fake: fake}
-	server := httptest.NewServer(engine)
-	defer server.Close()
 	_, offer := liveClientOffer(t)
-	response := liveRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/live", "gl-client", "application/sdp", []byte(offer))
-	if response.StatusCode != http.StatusBadGateway {
-		t.Fatal(response.StatusCode)
+	request := httptest.NewRequest(http.MethodPost, "/v1/live", strings.NewReader(offer))
+	request.Header.Set("Authorization", "Bearer gl-client")
+	request.Header.Set("Content-Type", "application/sdp")
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+	if response.Code != http.StatusBadGateway {
+		t.Fatal(response.Code)
 	}
 	fake.sessions[0].mu.Lock()
 	attempts := fake.sessions[0].hangup
@@ -120,10 +122,16 @@ func TestCodexLiveFailedSetupRetainsKnownUpstreamForCleanup(t *testing.T) {
 	if !pending {
 		t.Fatal("failed setup lost its pending cleanup")
 	}
+	if counts := handler.manager.Concurrency().Snapshot(); counts.Global != 1 || counts.AccessKeys[1] != 1 || counts.Groups[1] != 1 {
+		t.Fatalf("cleanup released active concurrency: %+v", counts)
+	}
 	if events := sink.snapshot(); len(events) != 1 || events[0].Status != telemetry.RequestStatusError {
 		t.Fatalf("setup failure logs = %+v", events)
 	}
 	handler.CloseCodexLive()
+	if counts := handler.manager.Concurrency().Snapshot(); counts.Global != 0 || len(counts.Groups) != 0 {
+		t.Fatalf("cleanup leaked concurrency: %+v", counts)
+	}
 	if len(sink.snapshot()) != 1 {
 		t.Fatal("cleanup duplicated the failed setup log")
 	}

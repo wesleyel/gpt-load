@@ -13,7 +13,9 @@ import (
 
 	"gpt-load/internal/dialect"
 	"gpt-load/internal/execution"
+	"gpt-load/internal/execution/responsemodel"
 	"gpt-load/internal/health"
+	"gpt-load/internal/platform/contentcoding"
 	platformheader "gpt-load/internal/platform/httpheader"
 	"gpt-load/internal/platform/redact"
 	"gpt-load/internal/protocol"
@@ -52,6 +54,14 @@ type rpmObservedWebsocketSession struct {
 func (session *rpmObservedWebsocketSession) ExecuteTurn(ctx context.Context, payload []byte, emit func(context.Context, []byte) error) execution.WebsocketResult {
 	session.store.Record(rpm.Credential, session.credentialID, false, time.Now())
 	return session.WebsocketSession.ExecuteTurn(ctx, payload, emit)
+}
+
+func (session *rpmObservedWebsocketSession) Interrupt(ctx context.Context, payload []byte) error {
+	sender, ok := session.WebsocketSession.(execution.WebsocketInterrupter)
+	if !ok {
+		return execution.ErrWebsocketInterruptUnsupported
+	}
+	return sender.Interrupt(ctx, payload)
 }
 
 func NewExecutionForwarder(executor execution.Executor) *ExecutionForwarder {
@@ -106,6 +116,15 @@ func (forwarder *ExecutionForwarder) Forward(
 			result.ClassificationBody,
 		)
 	}
+	if input.ObserveUsage && input.ClientProtocol == protocol.Anthropic && input.RouteMode == execution.RouteNative &&
+		result.HasResponse() && result.StatusCode >= http.StatusOK &&
+		result.StatusCode < http.StatusMultipleChoices && forwarder.usageCapture != nil {
+		// 与原生流一致，以响应体用量为准：SDK 只给汇总数字，会丢失 advisor 等按轮次计费的明细。
+		captured := forwarder.usageCapture.extractNonStreamingPlain(input.Dialect, result.ClassificationBody)
+		if captured.State != usage.StateMissing {
+			result.Usage = captured
+		}
+	}
 	if embeddingsProtocol(input.ClientProtocol) && result.Err == nil &&
 		result.StatusCode >= http.StatusOK && result.StatusCode < http.StatusMultipleChoices {
 		result.ClassificationBody = nil
@@ -149,12 +168,16 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 		return executionInputFailure(err)
 	}
 
+	ctx, stopFirstResponse := execution.WithFirstResponseObserver(ctx, input.OnFirstResponse)
+	defer stopFirstResponse()
+	firstData := execution.NewFirstResponseSSEFallback(ctx)
 	writeTimeout := forwarder.writeTimeout
 	if writeTimeout <= 0 {
 		writeTimeout = downstreamWriteTimeout
 	}
 	controller := newStreamWriteController(downstream, writeTimeout)
 	defer func() { _ = controller.clear() }()
+	outputDelivered := firstOutputSink(input.ClientProtocol, input.OnFirstOutput)
 	usageCapture := forwarder.usageCapture
 	if usageCapture == nil {
 		usageCapture = newUsageCaptureBoundary()
@@ -230,7 +253,6 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 	var (
 		ready         *execution.StreamEvent
 		committed     bool
-		firstResponse bool
 		downstreamErr error
 		errorBody     []byte
 		streamUsage   *execution.UsageEvidence
@@ -259,6 +281,7 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 			}
 			return
 		}
+		outputDelivered(held)
 		if input.OnStreamReady != nil {
 			input.OnStreamReady()
 		}
@@ -304,6 +327,7 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 				errorBody = appendExecutionErrorBody(errorBody, event.Data)
 				return nil
 			}
+			firstData(event.Data)
 			observedData := event.Data
 			if responsesStoreBuffer != nil {
 				observedData, err = responsesStoreBuffer.push(event.Data)
@@ -339,12 +363,6 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 				}
 			}
 			if !committed {
-				if !firstResponse {
-					firstResponse = true
-					if input.OnFirstResponse != nil {
-						input.OnFirstResponse()
-					}
-				}
 				if streamEvents.firstEventWasProviderError() {
 					errorBody = appendExecutionErrorBody(errorBody, forwardData)
 					return nil
@@ -375,6 +393,7 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 					downstreamErr = err
 					return err
 				}
+				outputDelivered(payload)
 				if input.OnStreamReady != nil {
 					input.OnStreamReady()
 				}
@@ -405,6 +424,7 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 				}
 				return downstreamErr
 			}
+			outputDelivered(forwardData)
 			if (redactionRestore != nil && redactionRestore.TerminalReleased()) ||
 				(redactionRestore == nil && terminalInChunk) {
 				streamEvents.markTerminalForwarded()
@@ -418,6 +438,9 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 
 	forwarder.recordCredentialAttempt(spec.Credential.ID)
 	terminal := forwarder.executor.ExecuteStream(ctx, spec, sink)
+	if terminal.Error == nil {
+		firstData([]byte{'\n'})
+	}
 	// 收尾全程持锁：迟到的计时器回调只会在此之后运行，届时数据已提交或已取走，
 	// 回调不会再写入可能已交给下一次尝试的响应。
 	mu.Lock()
@@ -446,12 +469,6 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 			if err != nil {
 				downstreamErr = executionRedactionStreamFailure()
 			} else if len(tail) > 0 {
-				if !firstResponse {
-					firstResponse = true
-					if input.OnFirstResponse != nil {
-						input.OnFirstResponse()
-					}
-				}
 				if !committed && streamEvents.firstEventWasProviderError() {
 					errorBody = appendExecutionErrorBody(errorBody, tail)
 				} else if !committed && !streamEvents.producedContent() &&
@@ -462,6 +479,9 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 					tail = append(held, tail...)
 					committed = true
 					downstreamErr = commitStream(controller, ready.StatusCode, ready.Header, tail)
+					if downstreamErr == nil {
+						outputDelivered(tail)
+					}
 					if downstreamErr == nil && input.OnStreamReady != nil {
 						input.OnStreamReady()
 					}
@@ -475,6 +495,8 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 					}
 					if writeErr != nil {
 						downstreamErr = &streamFailure{kind: streamFailureDownstreamWrite, err: writeErr}
+					} else {
+						outputDelivered(tail)
 					}
 				}
 			}
@@ -805,6 +827,14 @@ func (forwarder *ExecutionForwarder) prepareBufferedResult(
 		if err != nil {
 			return executionRepresentationFailure(result, err)
 		}
+		// 仅补回原生压缩正文的观测；普通正文可能已在执行层改写为客户端别名。
+		if !result.ResponseModelObserved && input.RouteMode == execution.RouteNative &&
+			responsemodel.IsConversation(input.ClientProtocol, input.Operation) {
+			encoding, err := contentcoding.ParseContentEncoding(headerFieldValues(result.Header, "Content-Encoding"))
+			if err == nil && encoding != contentcoding.Identity {
+				applyResponseModelObservation(&result, prepared.modelObservation)
+			}
+		}
 		result.Header = prepared.headers
 		result.Body = prepared.downstream
 		result.ClassificationBody = prepared.inspectable
@@ -967,6 +997,8 @@ func newExecutionAttemptSpec(input ForwardInput) (execution.AttemptSpec, error) 
 		RawQuery:                 input.Request.RawQuery,
 		Header:                   headers,
 		ConfiguredHeaders:        input.Group.HeaderRules.ConfiguredNames(),
+		ConfiguredParameters:     input.ConfiguredParameters,
+		RemovedParameterPaths:    input.RemovedParameterPaths,
 		Body:                     input.Request.Body,
 		IncludeUsage:             input.ObserveUsage,
 		ForceCredentialRefresh:   input.ForceCredentialRefresh,

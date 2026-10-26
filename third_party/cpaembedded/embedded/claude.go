@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 )
 
 const (
@@ -53,6 +53,7 @@ type ClaudeOptions struct {
 	RolesURL     string
 	BootstrapURL string
 	UsageURL     string
+	ResetBaseURL string
 	HTTPClient   *http.Client
 	Now          func() time.Time
 }

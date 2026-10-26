@@ -36,6 +36,15 @@ const tags = computed(() => {
         text: `${item.label} ${n(item.values.length)}`,
         tooltip: [item.label, ...item.values].join('\n'),
       })),
+    ...(props.row.concurrency.limit > 0
+      ? [
+          {
+            key: 'concurrency',
+            text: t('concurrency.limitTag', { limit: n(props.row.concurrency.limit) }),
+            tooltip: t('concurrency.accessKeyLimitHelp', { limit: n(props.row.concurrency.limit) }),
+          },
+        ]
+      : []),
     ...(props.row.rpm_limit > 0
       ? [
           {
@@ -196,6 +205,12 @@ const tone = computed<SemanticTone>(() =>
 }
 .modern-access-restriction-tag {
   flex: 0 1 auto;
+}
+@media (max-width: 760px) {
+  .modern-access-restrictions,
+  .modern-access-restriction-tags {
+    flex-wrap: wrap;
+  }
 }
 .modern-access-quota-summary {
   display: inline-flex;

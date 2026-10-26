@@ -67,10 +67,20 @@ export type RouteInspectOperation =
   | 'embeddings_create'
   | 'rerank'
   | 'decisions_create'
+  | 'mistral_ocr'
+  | 'mistral_fim'
+  | 'mistral_audio_transcription'
+  | 'mistral_audio_speech'
+  | 'mistral_moderation'
+  | 'mistral_chat_moderation'
+  | 'mistral_classification'
+  | 'mistral_voices'
+  | 'mistral_realtime_transcription'
 export type RouteInspectRequirement = 'any' | 'native'
 export type RouteInspectMode = 'native' | 'converted'
 
 export interface RouteInspectCredentialDto {
+  name: string
   credential_id: number
   available: boolean
   reason_code: RouteInspectReasonCode | null
@@ -80,6 +90,7 @@ export interface RouteInspectCredentialDto {
 }
 
 export interface RouteInspectGroupDto {
+  priority: number
   group_id: number
   group_name: string
   channel_id: string
@@ -129,6 +140,15 @@ export const routeInspectOperations = [
   'embeddings_create',
   'rerank',
   'decisions_create',
+  'mistral_ocr',
+  'mistral_fim',
+  'mistral_audio_transcription',
+  'mistral_audio_speech',
+  'mistral_moderation',
+  'mistral_chat_moderation',
+  'mistral_classification',
+  'mistral_voices',
+  'mistral_realtime_transcription',
 ] as const
 export const routeInspectRequirements = ['any', 'native'] as const
 const routeModes = ['native', 'converted'] as const
@@ -182,6 +202,7 @@ function projectNullableWeight(value: unknown): number | null {
 function projectRouteCredential(value: unknown): RouteInspectCredentialDto {
   const record = projectRecord(value)
   assertNoSecretLikeFields(record, [
+    'name',
     'credential_id',
     'available',
     'reason_code',
@@ -190,6 +211,7 @@ function projectRouteCredential(value: unknown): RouteInspectCredentialDto {
     'cooldown_until_ms',
   ])
   return {
+    name: projectString(record.name ?? '', { allowEmpty: true }),
     credential_id: projectSafeInteger(record.credential_id, { minimum: 1 }),
     available: projectBoolean(record.available),
     reason_code: projectReason(record.reason_code),
@@ -208,6 +230,7 @@ function projectRouteGroup(value: unknown): RouteInspectGroupDto {
     'route_mode',
     'route_requirement_satisfied',
     'upstream_model',
+    'priority',
     'weight_manual',
     'included',
     'routable',
@@ -221,6 +244,7 @@ function projectRouteGroup(value: unknown): RouteInspectGroupDto {
     route_mode: projectEnum(record.route_mode, routeModes),
     route_requirement_satisfied: projectBoolean(record.route_requirement_satisfied),
     upstream_model: projectNullableNonBlankString(record.upstream_model),
+    priority: projectSafeInteger(record.priority, { minimum: -2147483648, maximum: 2147483647 }),
     weight_manual: projectNullableWeight(record.weight_manual),
     included: projectBoolean(record.included),
     routable: projectBoolean(record.routable),

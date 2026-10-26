@@ -32,6 +32,7 @@ type CredentialImportResult struct {
 }
 
 type CredentialUpdateRequest struct {
+	Name         optionalField[string]                 `json:"name"`
 	Status       optionalField[state.CredentialStatus] `json:"status"`
 	WeightManual optionalField[int]                    `json:"weight_manual"`
 	Proxy        optionalField[outboundproxy.Config]   `json:"proxy"`
@@ -68,6 +69,7 @@ type CredentialSummaryResponse struct {
 }
 
 type CredentialAccountResponse struct {
+	PlanType        string `json:"-"`
 	Email           string `json:"email,omitempty"`
 	EmailMask       string `json:"email_mask,omitempty"`
 	ExpiresAtMS     *int64 `json:"expires_at_ms,omitempty"`
@@ -75,6 +77,7 @@ type CredentialAccountResponse struct {
 }
 
 type CredentialItemResponse struct {
+	Name                    string                         `json:"name"`
 	RPMPeakHour             *int64                         `json:"-"`
 	ModelCooldowns          []ModelCooldownResponse        `json:"model_cooldowns"`
 	CredentialID            uint                           `json:"credential_id"`
@@ -93,6 +96,7 @@ type CredentialItemResponse struct {
 	RecentFailureCount      uint64                         `json:"recent_failure_count"`
 	ConsecutiveFailureCount uint64                         `json:"consecutive_failure_count"`
 	LastFailureCategory     string                         `json:"last_failure_category"`
+	LastFailureSummary      string                         `json:"last_failure_summary,omitempty"`
 	LastStatusCode          *int                           `json:"last_status_code"`
 	CooldownUntilMS         *int64                         `json:"cooldown_until_ms"`
 	LastUsedAtMS            *int64                         `json:"last_used_at_ms,omitempty"`
@@ -192,7 +196,7 @@ func (s *Service) credentialPresentation(
 		}
 		stagedAccount := subscriptionCredentialAccount(credential)
 		account := CredentialAccountResponse{
-			Email: strings.TrimSpace(credential.Account().Email), EmailMask: stagedAccount.EmailMask,
+			PlanType: credential.Account().PlanType, Email: strings.TrimSpace(credential.Account().Email), EmailMask: stagedAccount.EmailMask,
 			ExpiresAtMS: stagedAccount.ExpiresAtMS, LastRefreshAtMS: stagedAccount.LastRefreshAtMS,
 		}
 		mask := account.EmailMask
@@ -434,6 +438,7 @@ func (s *Service) mapCredentialCollection(
 		if err != nil {
 			return CredentialCollectionResponse{}, err
 		}
+		item.Name = row.Name
 		item.ConnectionType = string(normalizeGroupConnectionType(observation.group.ConnectionType))
 		item.SecretVersion = row.SecretVersion
 		item.AuthState = string(row.AuthState)
@@ -442,6 +447,7 @@ func (s *Service) mapCredentialCollection(
 		item.Proxy = proxyViews[row.ID]
 		if item.ConnectionType == string(models.ConnectionTypeSubscription) {
 			item.Observation = presentCredentialObservation(observation.subscription[row.ID], row.IdentityFingerprint)
+			item.Observation = withCredentialPlan(item.Observation, account.PlanType)
 		}
 		var filterKey string
 		if query.modern != nil && query.modern.credentialKey != "" {
@@ -519,7 +525,8 @@ func credentialCollectionMatches(record credentialCollectionRecord, query Creden
 		return true
 	}
 	queryValue := strings.ToLower(query.Query)
-	return strings.Contains(strings.ToLower(record.item.Mask), queryValue) ||
+	return strings.Contains(strings.ToLower(record.item.Name), queryValue) ||
+		strings.Contains(strings.ToLower(record.item.Mask), queryValue) ||
 		strings.Contains(strings.ToLower(record.item.Account.Email), queryValue)
 }
 

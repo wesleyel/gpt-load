@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/maximhq/bifrost/core/providers/openai"
+	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"gpt-load/internal/channel"
@@ -23,6 +24,7 @@ import (
 	"gpt-load/internal/execution"
 	"gpt-load/internal/execution/geminiembedding"
 	"gpt-load/internal/execution/geminiimage"
+	"gpt-load/internal/execution/responsemodel"
 	"gpt-load/internal/protocol"
 	"gpt-load/internal/reasoning"
 )
@@ -239,6 +241,7 @@ func (r *Runtime) ExecuteStream(
 	defer preResponse.stop()
 
 	bifrostContext := r.newStreamingSDKContext(callContext, spec, prepared.directKey)
+	captureStreamErrorStatus(bifrostContext, prepared.upstreamProtocol)
 	enableConvertedWireCapture(bifrostContext, prepared)
 	setTypedRequestURL(bifrostContext, prepared.typedURL)
 	outcomeChannel := make(chan streamSDKResult, 1)
@@ -287,6 +290,7 @@ func (r *Runtime) ExecuteStream(
 	}
 
 	sequence := uint64(1)
+	modelObserver := responsemodel.New(prepared.upstreamProtocol, spec.UpstreamModel)
 	model := ""
 	var usageEvidence *execution.UsageEvidence
 	idleTimer := newIdleTimer(spec.Timeouts.StreamIdle)
@@ -346,7 +350,8 @@ func (r *Runtime) ExecuteStream(
 			response := chunk.BifrostChatResponse
 			captureAppliedReasoning(&response.ExtraFields.RawRequest, &appliedReasoning)
 			if response.Model != "" {
-				model = response.Model
+				modelObserver.ObserveModel(response.Model)
+				model = modelObserver.Model
 			}
 			payload, chunkUsage, err := encodeChatResponse(response)
 			if err != nil {
@@ -531,6 +536,9 @@ func (r *Runtime) prepare(spec execution.AttemptSpec, stream bool) (preparedAtte
 	if spec.ClientProtocol == protocol.Decisions {
 		return prepareDecisions(spec, resolved, provider, directKey, secrets)
 	}
+	if spec.ClientProtocol == protocol.Mistral {
+		return prepareMistral(spec, resolved, provider, directKey, secrets)
+	}
 	if spec.Operation == execution.OperationProbe {
 		if spec.ClientProtocol == protocol.OpenAIEmbeddings {
 			typedURL, targetErr := embeddingTypedTarget(providerKind, resolved.TargetConfig, "")
@@ -671,7 +679,7 @@ func (r *Runtime) prepare(spec execution.AttemptSpec, stream bool) (preparedAtte
 	if convertedImages || convertedEmbeddings || mode == channel.RouteNative && (nativeMessagePassthrough || providerSupportsPassthrough(providerKind)) {
 		body, sanitizedHeaders, err := sanitizeNativePassthroughRequest(spec, stream)
 		if err == nil && mode == channel.RouteNative && providerKind == channel.ProviderDeepSeek {
-			body, err = normalizeDeepSeekNativeRequest(body, spec.ClientProtocol)
+			body, err = normalizeDeepSeekNativeRequest(body, spec.ClientProtocol, spec.RemovedParameterPaths)
 		}
 		if err != nil {
 			failure := notSentUnaryFailure(execution.ErrorKindInvalidRequest, "invalid native request body")
@@ -741,7 +749,7 @@ func (r *Runtime) prepare(spec execution.AttemptSpec, stream bool) (preparedAtte
 			passthroughUpstreamURL = explicitPrefix
 		}
 		if spec.ClientProtocol == protocol.OpenAIImages {
-			explicitPrefix, configured, prefixErr := targetBaseURL(resolved.TargetConfig)
+			explicitPrefix, _, prefixErr := targetBaseURL(resolved.TargetConfig)
 			if prefixErr != nil {
 				failure := notSentUnaryFailure(execution.ErrorKindInvalidRequest, "invalid native request prefix")
 				failure.Error.OriginHint = execution.ErrorOriginClient
@@ -749,7 +757,7 @@ func (r *Runtime) prepare(spec execution.AttemptSpec, stream bool) (preparedAtte
 				failure.Error.ReplaySafety = execution.ReplaySafetyUnknown
 				return preparedAttempt{}, &failure
 			}
-			if providerKind == channel.ProviderOpenAICompatible || (providerKind == channel.ProviderOpenAI && configured) {
+			if providerKind == channel.ProviderOpenAICompatible {
 				passthroughUpstreamURL = explicitPrefix
 				passthroughPath, err = openAIImagesPrefixPath(spec.Path)
 				if err != nil {
@@ -919,6 +927,13 @@ func (r *Runtime) prepare(spec execution.AttemptSpec, stream bool) (preparedAtte
 	request.Model = spec.UpstreamModel
 	request.Fallbacks = nil
 	request.RawRequestBody = nil
+	if request.Params == nil {
+		request.Params = &schemas.ChatParameters{}
+	}
+	if err := mergeConvertedParameterOverrides(spec, &request.Params.ExtraParams); err != nil {
+		failure := notSentUnaryFailure(execution.ErrorKindInvalidRequest, err.Error())
+		return preparedAttempt{}, &failure
+	}
 	if request.Params != nil && request.Params.ExtraParams != nil {
 		delete(request.Params.ExtraParams, "provider")
 		delete(request.Params.ExtraParams, "fallback")
@@ -1035,6 +1050,8 @@ func supportedRequestShape(spec execution.AttemptSpec, stream bool) bool {
 			spec.Method == http.MethodPost && spec.Path == openAIChatPath
 	case protocol.OpenAIResponses:
 		switch spec.Operation {
+		case execution.OperationWebSearch:
+			return !stream && spec.RouteMode == execution.RouteNative && spec.Method == http.MethodPost && spec.Path == "/v1/alpha/search"
 		case execution.OperationResponsesCreate:
 			return spec.Method == http.MethodPost && spec.Path == "/v1/responses"
 		case execution.OperationResponsesRetrieve:
@@ -1069,6 +1086,8 @@ func supportedRequestShape(spec execution.AttemptSpec, stream bool) bool {
 		return !stream && spec.RouteMode == execution.RouteNative && spec.Operation == execution.OperationRerank && spec.Method == http.MethodPost && spec.Path == "/v1/rerank"
 	case protocol.Decisions:
 		return !stream && spec.RouteMode == execution.RouteNative && spec.Operation == execution.OperationDecisionsCreate && spec.Method == http.MethodPost && spec.Path == "/v1/systemone"
+	case protocol.Mistral:
+		return mistralRequestShape(spec, stream)
 	case protocol.OpenAIEmbeddings:
 		return !stream && (spec.RouteMode == execution.RouteNative || spec.RouteMode == execution.RouteConverted) &&
 			spec.Operation == execution.OperationEmbeddingsCreate &&
@@ -1483,6 +1502,19 @@ func (r *Runtime) providerKind(spec execution.AttemptSpec) channel.ProviderKind 
 
 func (r *Runtime) newStreamingSDKContext(parent context.Context, spec execution.AttemptSpec, directKey schemas.Key) *schemas.BifrostContext {
 	bifrostContext := r.newSDKContext(parent, spec, directKey)
+	// 保留 SDK 原始读取器及其终止标记，只旁路观察转换前的字节。
+	bifrostContext.SetValue(schemas.BifrostContextKeySSEReaderFactory, &providerUtils.SSEReaderFactory{
+		NewDataReader: func(reader io.Reader) providerUtils.SSEDataReader {
+			dataReader := providerUtils.GetSSEDataReader(nil, execution.ObserveFirstResponseReader(parent, reader))
+			if capture, _ := bifrostContext.Value(streamErrorStatusKey{}).(*streamErrorStatus); capture != nil {
+				return &streamErrorDataReader{SSEDataReader: dataReader, status: capture}
+			}
+			return dataReader
+		},
+		NewEventReader: func(reader io.Reader) providerUtils.SSEEventReader {
+			return providerUtils.GetSSEEventReader(nil, execution.ObserveFirstResponseReader(parent, reader))
+		},
+	})
 	if spec.Timeouts.StreamIdle > 0 {
 		// GPT-Load owns the user-facing chunk deadline; Bifrost remains a later raw-read backstop.
 		bifrostContext.SetValue(

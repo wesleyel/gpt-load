@@ -1,4 +1,5 @@
 import { codexLiveModes, type CodexLiveMode } from '@shared/codex-live'
+import { readErrorRules, type ErrorRule } from '@shared/error-rules'
 import { readRedactionRules, type RedactionRule } from './request-redaction'
 import {
   readJev,
@@ -18,6 +19,9 @@ import { readAutoModel, readAutoEntry, type AutoModelConfig, type AutoEntry } fr
 
 export const settingsKey = ['modern', 'settings'] as const
 export const settingNumbers = {
+  global_concurrency_limit: { min: 0, max: Number.MAX_SAFE_INTEGER, unit: 'times' },
+  default_access_key_concurrency_limit: { min: 0, max: Number.MAX_SAFE_INTEGER, unit: 'times' },
+  default_group_concurrency_limit: { min: 0, max: Number.MAX_SAFE_INTEGER, unit: 'times' },
   first_byte_timeout: { min: 1, max: 9_223_372_036, unit: 'seconds' },
   request_timeout: { min: 1, max: 9_223_372_036, unit: 'seconds' },
   stream_idle_timeout: { min: 1, max: 9_223_372_036, unit: 'seconds' },
@@ -48,6 +52,9 @@ export interface CORSConfig {
   max_age: number
 }
 export interface ProxyConfigView {
+  proxy_id?: number
+  proxy_name?: string
+  reference_state?: string
   configured_mode: 'inherit' | 'direct' | 'custom'
   effective_mode: 'direct' | 'environment' | 'custom'
   effective_source: 'credential' | 'group' | 'global' | 'environment' | 'default'
@@ -66,9 +73,11 @@ export type SettingsValues = Record<SettingNumber, number> &
     jev: JevConfig
     request_redaction: RedactionRule[]
     request_audit: AuditConfig
+    error_rules: ErrorRule[]
   }
 export type SettingKey = keyof SettingsValues
 export const settingKeys: readonly SettingKey[] = [
+  'error_rules',
   'codex_live_mode',
   'route_strategy',
   ...settingSwitches,
@@ -94,7 +103,7 @@ export interface SettingsData {
 }
 export type SettingsPatch = Partial<{
   [K in Exclude<SettingKey, 'proxy_config'>]: SettingsValues[K] | null
-}> & { proxy_config?: { mode: 'direct' } | { mode: 'custom'; url: string } | null }
+}> & { proxy_config?: { mode: 'direct' } | { mode: 'custom'; proxy_id: number } | null }
 
 function readHeaders(value: unknown): HeaderRules {
   const row = record(value)
@@ -120,6 +129,9 @@ function readCORS(value: unknown): CORSConfig {
 function readProxy(value: unknown): ProxyConfigView {
   const row = record(value)
   const result: ProxyConfigView = {
+    proxy_id: row.proxy_id === undefined ? undefined : integer(row.proxy_id, 1),
+    proxy_name: row.proxy_name === undefined ? undefined : text(row.proxy_name),
+    reference_state: row.reference_state === undefined ? undefined : text(row.reference_state),
     configured_mode: oneOf(row.configured_mode, ['inherit', 'direct', 'custom']),
     effective_mode: oneOf(row.effective_mode, ['direct', 'environment', 'custom']),
     effective_source: oneOf(row.effective_source, [
@@ -160,6 +172,7 @@ function readSettings(value: unknown): SettingsData {
     auditAccessKeys: readAuditAccessKeys(row.audit_access_keys),
     requestAuditPreset: readAudit(row.request_audit_preset),
     values: {
+      error_rules: readErrorRules(values.error_rules ?? []),
       ...numbers,
       ...switches,
       codex_live_mode: oneOf(values.codex_live_mode, codexLiveModes),

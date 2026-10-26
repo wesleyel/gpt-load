@@ -28,6 +28,7 @@ import (
 	"gpt-load/internal/platform/encryption"
 	"gpt-load/internal/platform/httpclient"
 	"gpt-load/internal/platform/httproute"
+	"gpt-load/internal/platform/memlimit"
 	"gpt-load/internal/platform/redact"
 	"gpt-load/internal/pricing"
 	"gpt-load/internal/provideradapter"
@@ -51,6 +52,7 @@ func BuildContainer() (*dig.Container, error) {
 
 	providers := []any{
 		config.Load,
+		memlimit.Detect,
 		func(cfg *config.Config) (encryption.Service, error) {
 			return encryption.NewServiceWithKeyFile(cfg.EncryptionKey, cfg.DataDir)
 		},
@@ -171,6 +173,7 @@ func BuildContainer() (*dig.Container, error) {
 		dialect.NewAnthropic,
 		dialect.NewGemini,
 		dialect.NewGeminiEmbeddings,
+		dialect.NewMistral,
 		func(
 			openAI *dialect.OpenAI,
 			openAIResponses *dialect.OpenAIResponses,
@@ -181,9 +184,10 @@ func BuildContainer() (*dig.Container, error) {
 			anthropic *dialect.Anthropic,
 			gemini *dialect.Gemini,
 			geminiEmbeddings *dialect.GeminiEmbeddings,
+			mistral *dialect.Mistral,
 		) dialect.Set {
 			return dialect.NewSet(
-				openAI, openAIResponses, openAIImages, openAIEmbeddings, rerank, decisions, anthropic, gemini, geminiEmbeddings,
+				openAI, openAIResponses, openAIImages, openAIEmbeddings, rerank, decisions, anthropic, gemini, geminiEmbeddings, mistral,
 			)
 		},
 		func(registry *channel.Registry) (*bifrostexecutor.RuntimeManager, error) {
@@ -200,6 +204,7 @@ func BuildContainer() (*dig.Container, error) {
 		newSubscriptionRuntime,
 		subscription.NewCredentialManager,
 		cpaexecutor.NewAdapter,
+		subscriptionproviders.NewModelCatalogUpdater,
 		newProviderAdapterRegistry,
 		func(registry *provideradapter.Registry) execution.Executor { return registry },
 		func(runtime *bifrostexecutor.RuntimeManager) app.ExecutionRuntime { return runtime },
@@ -253,8 +258,10 @@ func BuildContainer() (*dig.Container, error) {
 		handler *gateway.Handler,
 		adapter *cpaexecutor.Adapter,
 		cfg *config.Config,
+		memory memlimit.Memory,
 	) *gateway.Handler {
 		handler.ConfigureCodexLive(adapter, cfg.CodexLive)
+		handler.ConfigureRequestBodyLimit(memory)
 		return handler
 	}); err != nil {
 		return nil, err

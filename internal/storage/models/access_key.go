@@ -2,6 +2,7 @@ package models
 
 // AccessKey is an encrypted client credential and its persisted access policy.
 type AccessKey struct {
+	ConcurrencyLimit        *int64  `gorm:"type:bigint;check:chk_access_key_concurrency,concurrency_limit >= 0 AND concurrency_limit <= 9007199254740991"`
 	PriceMultiplierMicros   *int64  `gorm:"column:price_multiplier_micros;type:bigint;not null;default:1000000;check:chk_access_key_price_multiplier,price_multiplier_micros >= 0 AND price_multiplier_micros <= 1000000000"`
 	ID                      uint    `gorm:"primaryKey;autoIncrement"`
 	Name                    string  `gorm:"type:varchar(255);not null"`
@@ -15,6 +16,7 @@ type AccessKey struct {
 	DailyCostLimitNanoUSD   int64   `gorm:"column:daily_cost_limit_nano_usd;not null;default:0;check:chk_access_key_daily_cost_limit_nano,daily_cost_limit_nano_usd >= 0"`
 	MonthlyCostLimitNanoUSD int64   `gorm:"column:monthly_cost_limit_nano_usd;not null;default:0;check:chk_access_key_monthly_cost_limit_nano,monthly_cost_limit_nano_usd >= 0"`
 	ExpiresAtMS             *int64  `gorm:"column:expires_at_ms"`
+	RecordRequestBody       bool    `gorm:"not null;default:false"`
 	CreatedAtMS             int64   `gorm:"column:created_at_ms;not null;autoCreateTime:milli;check:chk_access_key_created_at,created_at_ms >= 0"`
 	UpdatedAtMS             int64   `gorm:"column:updated_at_ms;not null;autoUpdateTime:milli;check:chk_access_key_updated_at,updated_at_ms >= 0"`
 }

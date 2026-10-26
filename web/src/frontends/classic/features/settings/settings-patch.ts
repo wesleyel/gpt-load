@@ -1,4 +1,5 @@
 import type { CodexLiveMode } from '@shared/codex-live'
+import { cloneErrorRules, validErrorRules, type ErrorRule } from '@shared/error-rules'
 import type { RedactionRule } from '@/app/resources/request-redaction'
 import {
   defaultJev,
@@ -31,6 +32,10 @@ export interface SettingsDraft {
 }
 
 const requestForwardingKeys: RuntimeSettingKey[] = [
+  'error_rules',
+  'global_concurrency_limit',
+  'default_access_key_concurrency_limit',
+  'default_group_concurrency_limit',
   'codex_live_mode',
   'responses_websocket_enabled',
   'route_strategy',
@@ -65,6 +70,7 @@ function cloneCORSConfig(value: CORSConfigDto): CORSConfigDto {
 function cloneValues(value: SettingsValues): SettingsValues {
   return {
     ...value,
+    error_rules: cloneErrorRules(value.error_rules),
     jev: { ...value.jev },
     request_redaction: value.request_redaction.map((rule) => ({ ...rule })),
     request_audit: JSON.parse(JSON.stringify(value.request_audit)) as AuditConfig,
@@ -132,6 +138,8 @@ export function setSettingsOverride(
       ) as AutoModelConfigDto
     } else if (key === 'header_rules') {
       next.values.header_rules = cloneHeaderRules(base.values.header_rules)
+    } else if (key === 'error_rules') {
+      next.values.error_rules = cloneErrorRules(base.values.error_rules)
     } else if (key === 'response_header_rules') {
       next.values.response_header_rules = cloneHeaderRules(base.values.response_header_rules)
     } else {
@@ -150,6 +158,7 @@ export function setSettingsOverride(
     if (key === 'auto_model')
       next.values.auto_model = persisted ? defaultAutoModel() : cloneValues(base.values).auto_model
     if (key === 'header_rules') next.values.header_rules = { set: {}, remove: [] }
+    if (key === 'error_rules') next.values.error_rules = []
     if (key === 'response_header_rules') next.values.response_header_rules = { set: {}, remove: [] }
   }
   return next
@@ -177,6 +186,7 @@ function normalizedWireValue(
   | JevConfig
   | AuditConfig
   | RedactionRule[]
+  | ErrorRule[]
   | undefined {
   if (key === 'header_rules' || key === 'response_header_rules')
     return normalizeHeaderRules(settings[key])
@@ -220,6 +230,7 @@ function normalizedIdentityValue(
   | JevConfig
   | AuditConfig
   | RedactionRule[]
+  | ErrorRule[]
   | undefined {
   if (key === 'header_rules' || key === 'response_header_rules')
     return canonicalHeaderRulesIdentity(settings[key])
@@ -401,8 +412,15 @@ export function validateSettingsSection(draft: SettingsDraft, section: SettingsS
     'stream_idle_timeout',
     'validation_interval',
   ]
-  const policyCounts: PolicyCountSettingKey[] = ['retry_count', 'blacklist_threshold']
+  const policyCounts: PolicyCountSettingKey[] = [
+    'retry_count',
+    'blacklist_threshold',
+    'global_concurrency_limit',
+    'default_access_key_concurrency_limit',
+    'default_group_concurrency_limit',
+  ]
   return (
+    (!draft.overrides.has('error_rules') || validErrorRules(draft.values.error_rules)) &&
     timeouts.every((key) => !draft.overrides.has(key) || isValidTimeout(draft.values[key])) &&
     policyCounts.every(
       (key) => !draft.overrides.has(key) || isValidNonNegativeInteger(draft.values[key]),

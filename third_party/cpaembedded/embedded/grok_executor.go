@@ -10,12 +10,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	internalexecutor "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	internalexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/sjson"
 )
 
@@ -94,8 +94,8 @@ func NewGrokAuth(id string, credential GrokCredential, baseURL string) *cliproxy
 		"auth_kind": "oauth", "using_api": "false",
 		// CPA 默认仅向官方域附加这些头，API 代理仍需保持相同订阅协议。
 		"header:X-XAI-Token-Auth":         "xai-grok-cli",
-		"header:x-grok-client-version":    grokClientVersion,
-		"header:User-Agent":               "xai-grok-workspace/" + grokClientVersion,
+		"header:x-grok-client-version":    GrokClientVersion,
+		"header:User-Agent":               "xai-grok-workspace/" + GrokClientVersion,
 		"header:x-grok-client-identifier": "grok-shell",
 		"header:x-authenticateresponse":   "authenticate-response",
 	}
@@ -133,11 +133,15 @@ func (executor *grokHTTPExecutor) ExecuteCanonical(
 		Model: request.Model, Payload: append([]byte(nil), request.Payload...), Format: format,
 	}, grokExecutorOptions(request, format, false))
 	if err != nil {
-		return ExecuteResponse{Headers: observation.responseHeaders(), AppliedReasoningEffort: observation.reasoningEffort()}, normalizeGrokExecutionError(err)
+		return ExecuteResponse{Headers: observation.responseHeaders(), AppliedReasoningEffort: observation.reasoningEffort(),
+			AppliedReasoningMode:         observation.reasoningMode(),
+			AppliedReasoningBudgetTokens: observation.reasoningBudgetTokens()}, normalizeGrokExecutionError(err)
 	}
 	return ExecuteResponse{
 		Payload: append([]byte(nil), response.Payload...), Headers: response.Headers.Clone(),
-		AppliedReasoningEffort: observation.reasoningEffort(),
+		AppliedReasoningEffort:       observation.reasoningEffort(),
+		AppliedReasoningMode:         observation.reasoningMode(),
+		AppliedReasoningBudgetTokens: observation.reasoningBudgetTokens(),
 	}, nil
 }
 
@@ -197,7 +201,9 @@ func (executor *grokHTTPExecutor) ExecuteStreamCanonical(
 		Model: request.Model, Payload: append([]byte(nil), request.Payload...), Format: format,
 	}, grokExecutorOptions(request, format, true))
 	if err != nil {
-		return &ExecuteStreamResponse{Headers: observation.responseHeaders(), AppliedReasoningEffort: observation.reasoningEffort()}, normalizeGrokExecutionError(err)
+		return &ExecuteStreamResponse{Headers: observation.responseHeaders(), AppliedReasoningEffort: observation.reasoningEffort(),
+			AppliedReasoningMode:         observation.reasoningMode(),
+			AppliedReasoningBudgetTokens: observation.reasoningBudgetTokens()}, normalizeGrokExecutionError(err)
 	}
 	chunks := make(chan ExecuteStreamChunk)
 	go func() {
@@ -216,7 +222,9 @@ func (executor *grokHTTPExecutor) ExecuteStreamCanonical(
 	}()
 	return &ExecuteStreamResponse{
 		Headers: response.Headers.Clone(), Chunks: chunks,
-		AppliedReasoningEffort: observation.reasoningEffort(),
+		AppliedReasoningEffort:       observation.reasoningEffort(),
+		AppliedReasoningMode:         observation.reasoningMode(),
+		AppliedReasoningBudgetTokens: observation.reasoningBudgetTokens(),
 	}, nil
 }
 

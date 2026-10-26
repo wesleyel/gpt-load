@@ -1,4 +1,19 @@
+import { errorRuleMessages } from '@shared/error-rule-messages'
+import { jaJP as proxies } from '@shared/proxies/messages'
 export default {
+  errorRules: errorRuleMessages['ja-JP'],
+  proxies,
+  concurrency: {
+    label: '同時実行数の上限',
+    value: '同時実行 {current} / {limit}',
+    inherit: 'デフォルトを継承',
+    unlimited: '無制限',
+    overrideHelp: '空欄でデフォルトを継承、0 で無制限。上限到達時は即座に拒否します。',
+    limitHelp: '0 は無制限。データプレーンの同時実行を制限し、上限到達時は即座に拒否します。',
+    global_concurrency_limit: '全体の同時実行数上限',
+    default_access_key_concurrency_limit: 'アクセスキーのデフォルト同時実行数上限',
+    default_group_concurrency_limit: 'グループのデフォルト同時実行数上限',
+  },
   common: {
     upstreamUrl: {
       label: 'カスタム上流 URL',
@@ -107,6 +122,8 @@ export default {
         '認証情報を一時的に更新できません。しばらくしてから再試行してください',
       versionConflict: '認証が別の操作で更新されました。再読み込みしてから再試行してください',
       resetCreditUnavailable: '利用可能なリセットクレジットがありません。先に同期してください',
+      resetCreditPreparationFailed:
+        'リセットの準備に失敗しました。リセットカードは消費されていません。しばらくしてから再試行してください',
       resetCreditRejected:
         '上流でリセットクレジットを使用できませんでした。同期後に再試行してください',
       resetCreditOutcomeUnknown:
@@ -213,6 +230,8 @@ export default {
     accessKeyReadOnly: 'アクセスキー · 読み取り専用',
     accessKeyReadOnlyDescription:
       'アクセスキーでログイン中です。ページとデータはこのキーに限定され、システム設定は変更できません。',
+    requestBodyRecordingNotice:
+      '管理者がこのアクセスキーのリクエスト内容の記録を有効にしました。このキーで送信した内容は {days} 日間保存され、管理者とこのキーを持つ人が閲覧できます。記録されたくない内容は、このキーで送信しないでください。',
     language: '言語',
     theme: 'テーマ',
     localeZh: '简体中文',

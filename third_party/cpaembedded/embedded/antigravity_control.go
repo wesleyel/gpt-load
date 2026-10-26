@@ -13,7 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 )
 
 const maxAntigravityModels = 20_000
@@ -180,7 +180,7 @@ func fetchAntigravityPlan(
 ) (string, string, *AntigravityCredit, bool, error) {
 	endpoint := strings.TrimSpace(options.LoadCodeAssistURL)
 	if endpoint == "" {
-		endpoint = antigravityauth.APIEndpoint + "/" + antigravityauth.APIVersion + ":loadCodeAssist"
+		endpoint = antigravityauth.DailyAPIEndpoint + "/" + antigravityauth.APIVersion + ":loadCodeAssist"
 	}
 	payload, err := json.Marshal(map[string]any{"metadata": map[string]string{"ideType": "ANTIGRAVITY"}})
 	if err != nil {

@@ -1,3 +1,4 @@
+import { credentialDisplayText } from '@shared/credential-display'
 import {
   keepPreviousData,
   queryOptions,
@@ -69,6 +70,7 @@ export type {
 } from '@/api/control/types'
 
 export interface CredentialPatch {
+  name?: string
   status?: CredentialConfiguredStatus
   weight_manual?: number | null
   proxy?: ProxyMutation
@@ -95,6 +97,7 @@ const credentialSummaryFields = [
   'disabled',
 ] as const
 const credentialItemFields = [
+  'name',
   'model_cooldowns',
   'credential_id',
   'connection_type',
@@ -111,6 +114,7 @@ const credentialItemFields = [
   'recent_failure_count',
   'consecutive_failure_count',
   'last_failure_category',
+  'last_failure_summary',
   'last_status_code',
   'cooldown_until_ms',
   'last_used_at_ms',
@@ -182,6 +186,7 @@ const observationSnapshotFields = [
   'plan_summary',
   'account_summary',
   'quota_windows',
+  'credits',
   'reset_credits_available',
   'reset_credits',
 ] as const
@@ -203,6 +208,7 @@ const observationAccountFields = [
   'subscription_created_at_ms',
 ] as const
 const resetCreditFields = ['expires_at_ms'] as const
+const creditSummaryFields = ['balance', 'has_credits', 'unlimited', 'observed_at_ms'] as const
 const resetCreditConsumeFields = [
   'status',
   'windows_reset',
@@ -424,6 +430,25 @@ function projectObservationSnapshot(value: unknown): CredentialObservationSnapsh
     invalidResponse()
   }
   let accountSummary: CredentialObservationSnapshotDto['account_summary']
+  let credits: CredentialObservationSnapshotDto['credits']
+  if (record.credits != null) {
+    const creditRecord = projectRecord(record.credits)
+    assertNoSecretLikeFields(creditRecord, creditSummaryFields)
+    credits = {
+      ...(creditRecord.balance == null
+        ? {}
+        : { balance: projectString(creditRecord.balance, { allowEmpty: false }) }),
+      ...(creditRecord.has_credits == null
+        ? {}
+        : { has_credits: projectBoolean(creditRecord.has_credits) }),
+      ...(creditRecord.unlimited == null
+        ? {}
+        : { unlimited: projectBoolean(creditRecord.unlimited) }),
+      ...(creditRecord.observed_at_ms == null
+        ? {}
+        : { observed_at_ms: projectEpochMilliseconds(creditRecord.observed_at_ms) }),
+    }
+  }
   if (record.account_summary !== undefined) {
     const accountRecord = projectRecord(record.account_summary)
     assertNoSecretLikeFields(accountRecord, observationAccountFields)
@@ -466,6 +491,7 @@ function projectObservationSnapshot(value: unknown): CredentialObservationSnapsh
     },
     ...(accountSummary === undefined ? {} : { account_summary: accountSummary }),
     quota_windows: quotaWindows,
+    ...(credits === undefined ? {} : { credits }),
     ...(record.reset_credits_available === undefined
       ? {}
       : {
@@ -569,6 +595,12 @@ export function projectCredentialItem(value: unknown): CredentialItemDto {
     connection_type: connectionType,
     model_cooldowns: projectArray(record.model_cooldowns, projectModelCooldown),
     secret_version: projectSafeInteger(record.secret_version, { minimum: 1 }),
+    name: projectString(record.name ?? '', { allowEmpty: true }),
+    label: credentialDisplayText(
+      projectString(record.name ?? '', { allowEmpty: true }),
+      projectAccount(record.account, connectionType).email || projectMask(record.mask),
+      connectionType,
+    ),
     mask: projectMask(record.mask),
     account: projectAccount(record.account, connectionType),
     auth_state: projectEnum(record.auth_state, authStates),
@@ -585,6 +617,9 @@ export function projectCredentialItem(value: unknown): CredentialItemDto {
     recent_failure_count: projectSafeInteger(record.recent_failure_count, { minimum: 0 }),
     consecutive_failure_count: projectSafeInteger(record.consecutive_failure_count, { minimum: 0 }),
     last_failure_category: projectEnum(record.last_failure_category, failureCategories),
+    ...(record.last_failure_summary === undefined
+      ? {}
+      : { last_failure_summary: projectString(record.last_failure_summary) }),
     last_status_code:
       record.last_status_code === null
         ? null
@@ -672,11 +707,15 @@ function normalizePatch(patch: CredentialPatch): CredentialPatch {
   const keys = Object.keys(patch)
   if (
     keys.length === 0 ||
-    keys.some((key) => key !== 'status' && key !== 'weight_manual' && key !== 'proxy')
+    keys.some(
+      (key) => key !== 'name' && key !== 'status' && key !== 'weight_manual' && key !== 'proxy',
+    )
   ) {
     throw new Error('INVALID_CREDENTIAL_PATCH')
   }
   const body: CredentialPatch = {}
+  if (Object.prototype.hasOwnProperty.call(patch, 'name'))
+    body.name = projectString(patch.name, { allowEmpty: true }).trim()
   if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
     body.status = projectEnum(patch.status, configuredStatuses)
   }
@@ -1092,6 +1131,7 @@ function matchesFilters(item: CredentialItemDto, filters: CredentialCollectionFi
   if (filters.q === undefined) return true
   const query = filters.q.toLowerCase()
   return (
+    item.name.toLowerCase().includes(query) ||
     item.mask.toLowerCase().includes(query) ||
     item.account.email?.toLowerCase().includes(query) === true
   )

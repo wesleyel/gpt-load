@@ -9,6 +9,7 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Upload,
 } from '@lucide/vue'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
@@ -17,6 +18,12 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { useApiClient } from '@shared/http/client-context'
 import { ApiError } from '@shared/http/errors'
+import { useCredentialTestBatch, type CredentialTestOptions } from '@shared/credential-test-batch'
+import {
+  APIKeyFileImportError,
+  readAPIKeyCredentialFiles,
+  type APIKeyFileImport,
+} from '@shared/api-key-file-import'
 import type {
   AccessProtocol,
   CredentialCollectionDto,
@@ -51,7 +58,13 @@ import {
   inspectGroupCredentialConnection,
   type CredentialStage,
 } from '@/app/resources/credential-stages'
-import { getGroupModels, getGroupSettings } from '@/app/resources/groups'
+import {
+  getGroupModels,
+  getGroupSettings,
+  importGroupCredentials,
+  type CredentialImportResult,
+} from '@/app/resources/groups'
+import { applyInvalidationPlan, mutationInvalidationPlans } from '@/app/resources/invalidation'
 import { groupDetailLocation, importLocation } from '@/app/route-locations'
 import { controlQueryKeys } from '@/app/query-keys'
 import { useToast } from '@/app/toast'
@@ -72,6 +85,7 @@ import PaginationBar from '@/components/ui/PaginationBar.vue'
 import QueryFeedback from '@/components/ui/QueryFeedback.vue'
 import SkeletonSurface from '@/components/ui/SkeletonSurface.vue'
 import SubscriptionCredentialStager from '@/features/import/SubscriptionCredentialStager.vue'
+import { useStableImportOperation } from '@/features/import/import-operation'
 import { presentSubscriptionErrorKey } from '@/features/subscription-error-presenter'
 import { createUUID } from '@/lib/uuid'
 
@@ -89,7 +103,7 @@ import {
 } from '../group-route'
 
 const batchCredentialConcurrency = 4
-type FullCredentialAction = 'download' | 'enable' | 'disable' | 'restore'
+type FullCredentialAction = 'download' | 'enable' | 'disable' | 'restore' | 'import'
 type CredentialTestRestoreError = 'failed' | 'conflict' | 'conflict_refresh_failed'
 
 const props = defineProps<{
@@ -142,6 +156,17 @@ const credentialTestProtocol = ref<AccessProtocol>()
 const credentialTestProtocols = ref<AccessProtocol[]>([])
 const credentialTestSettingsPending = ref(false)
 const credentialTestTarget = ref<CredentialItemDto>()
+const credentialBatchTargets = ref<number[]>([])
+const {
+  report: testBatch,
+  pending: testBatchPending,
+  itemsByID: testBatchItems,
+  counts: testBatchCounts,
+  retryIDs: testBatchRetryIDs,
+  run: runTestBatch,
+  stop: stopTestBatch,
+  reset: resetTestBatch,
+} = useCredentialTestBatch()
 const credentialTestResult = ref<CredentialTestResultDto>()
 const credentialTestRequestFailed = ref(false)
 const credentialTestRestoreBlocked = ref(false)
@@ -150,6 +175,14 @@ const resetOperationKeys = new Map<number, string>()
 const connectionWorkspaceOpen = ref(false)
 const fullActionsOpen = ref(false)
 const fullActionTarget = ref<FullCredentialAction>()
+const importInput = ref<HTMLInputElement>()
+const importFile = ref<APIKeyFileImport>()
+const importFeedback = ref('')
+const importOperation = useStableImportOperation<
+  { groupID: number; credentials: string },
+  CredentialImportResult
+>()
+let importOwner = 0
 const connectionStages = ref<CredentialStage[]>([])
 const connectionImportState = ref({ busy: false, hasResults: false })
 const connectOperationKey = ref<string>()
@@ -192,8 +225,9 @@ const allVisibleSelected = computed(() => {
     items.length > 0 && items.every(({ credential_id }) => selectedIds.value.has(credential_id))
   )
 })
-const batchBusy = computed(() =>
-  [...pendingOperations.value].some((key) => key.startsWith('batch:')),
+const batchBusy = computed(
+  () =>
+    testBatchPending.value || [...pendingOperations.value].some((key) => key.startsWith('batch:')),
 )
 const singleBusy = computed(() =>
   [...pendingOperations.value].some((key) => !key.startsWith('batch:')),
@@ -223,6 +257,18 @@ const fullCredentialKind = computed(() =>
 const fullActionCopy = computed(() => {
   const action = fullActionTarget.value
   if (action === undefined) return { title: '', description: '', confirm: '' }
+  if (action === 'import')
+    return {
+      title: t('group.credentials.full.import'),
+      description: t('group.credentials.fileImport.description', {
+        count: n(importFile.value?.count ?? 0),
+      }),
+      confirm: t(
+        importOperation.operation.value
+          ? 'import.operation.checkResult'
+          : 'group.credentials.full.import',
+      ),
+    }
   return {
     title: t(`group.credentials.full.confirmTitle.${action}`, {
       kind: fullCredentialKind.value,
@@ -336,7 +382,9 @@ watch(
 watch(
   () => props.groupId,
   () => {
+    resetFileImport()
     resetCredentialTestState()
+    resetTestBatch()
     connectionWorkspaceOpen.value = false
     fullActionsOpen.value = false
     fullActionTarget.value = undefined
@@ -569,6 +617,9 @@ function withPreservedDetail(
     ...item,
     ...(source.last_used_at_ms === undefined ? {} : { last_used_at_ms: source.last_used_at_ms }),
     ...(source.daily_usage === undefined ? {} : { daily_usage: source.daily_usage }),
+    ...(item.last_failure_summary === undefined && source.last_failure_summary !== undefined
+      ? { last_failure_summary: source.last_failure_summary }
+      : {}),
   }
   const sourceObservation = source.observation
   const targetObservation = item.observation
@@ -774,14 +825,119 @@ async function downloadCredentialFile(item: CredentialItemDto): Promise<void> {
 }
 
 function openFullAction(action: FullCredentialAction): void {
-  if (bulkActionsBusy.value || (collection.value?.summary.total ?? 0) === 0) return
+  if (bulkActionsBusy.value) return
+  if (action === 'import') {
+    if (props.connectionType !== 'api_key') return
+    fullActionsOpen.value = false
+    if (importFile.value) fullActionTarget.value = 'import'
+    else importInput.value?.click()
+    return
+  }
+  if ((collection.value?.summary.total ?? 0) === 0) return
   fullActionsOpen.value = false
   fullActionTarget.value = action
 }
 
+function resetFileImport(): void {
+  importOwner++
+  importFile.value = undefined
+  importFeedback.value = ''
+  importOperation.reset()
+  setPending('batch', 'all-import', false)
+}
+function closeFullAction(): void {
+  if (fullActionBusy.value) return
+  fullActionTarget.value = undefined
+  if (!importOperation.operation.value) resetFileImport()
+}
+async function selectImportFiles(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!files.length || bulkActionsBusy.value || props.connectionType !== 'api_key') return
+  const owner = ++importOwner
+  setPending('batch', 'all-import', true)
+  feedback.value = ''
+  importFeedback.value = ''
+  try {
+    const result = await readAPIKeyCredentialFiles(files)
+    if (owner !== importOwner) return
+    importFile.value = result
+    fullActionTarget.value = 'import'
+  } catch (cause) {
+    if (owner === importOwner)
+      feedback.value = t(
+        'group.credentials.fileImport.' +
+          (cause instanceof APIKeyFileImportError ? cause.code : 'read_failed'),
+      )
+  } finally {
+    if (owner === importOwner) setPending('batch', 'all-import', false)
+  }
+}
+async function confirmFileImport(): Promise<void> {
+  if (!importFile.value) return
+  const owner = importOwner
+  importOperation.begin({ groupID: props.groupId, credentials: importFile.value.credentials })
+  setPending('batch', 'all-import', true)
+  importFeedback.value = ''
+  try {
+    const outcome = await importOperation.execute((operation, signal) =>
+      importGroupCredentials(
+        client,
+        operation.payload.groupID,
+        { credentials: operation.payload.credentials },
+        operation.idempotencyKey,
+        signal,
+      ),
+    )
+    if (!outcome || owner !== importOwner) return
+    if (outcome.kind === 'confirmed') {
+      const result = outcome.value
+      fullActionTarget.value = undefined
+      resetFileImport()
+      await applyInvalidationPlan(
+        queryClient,
+        mutationInvalidationPlans.group.importCredentials(result.group_id),
+      )
+      toast.show({
+        message: t('import.credentials.result', {
+          added: n(result.credentials_added),
+          duplicated: n(result.credentials_duplicated),
+        }),
+        tone: 'success',
+      })
+    } else if (outcome.kind === 'failed' && outcome.reason === 'rejected') {
+      const cause = importOperation.lastError.value
+      importFeedback.value =
+        cause instanceof ApiError ? cause.message : t('import.existing.importFailed')
+      importOperation.reset()
+    } else if (outcome.kind === 'failed' && outcome.reason === 'expired-known') {
+      fullActionTarget.value = undefined
+      resetFileImport()
+      feedback.value = t('import.operation.expired')
+    } else {
+      importFeedback.value = t(
+        'import.operation.' +
+          (outcome.kind === 'reconciling'
+            ? 'reconciling'
+            : outcome.kind === 'failed' && outcome.reason === 'retryable-precondition'
+              ? 'waiting'
+              : 'indeterminate'),
+      )
+    }
+  } finally {
+    if (owner === importOwner) setPending('batch', 'all-import', false)
+  }
+}
+onBeforeUnmount(resetFileImport)
+
 async function confirmFullAction(): Promise<void> {
   const action = fullActionTarget.value
   if (action === undefined || batchBusy.value || singleBusy.value) return
+  if (action === 'import') {
+    await confirmFileImport()
+    return
+  }
   feedback.value = ''
   setPending('batch', `all-${action}`, true)
   try {
@@ -1298,6 +1454,7 @@ function resetCredentialTestState(): void {
     setPending(credentialID, 'test-restore', false)
   }
   credentialTestTarget.value = undefined
+  credentialBatchTargets.value = []
   credentialTestModel.value = undefined
   credentialTestModels.value = []
   credentialTestProtocol.value = undefined
@@ -1318,6 +1475,21 @@ async function openCredentialTest(item: CredentialItemDto): Promise<void> {
   if (props.connectionType !== 'api_key' || batchBusy.value || pending(item.credential_id)) return
   resetCredentialTestState()
   credentialTestTarget.value = item
+  await loadCredentialTestSettings()
+}
+
+async function openBatchCredentialTest(): Promise<void> {
+  if (props.connectionType !== 'api_key' || bulkActionsBusy.value) return
+  const ids = (collection.value?.items ?? [])
+    .filter((item) => selectedIds.value.has(item.credential_id))
+    .map((item) => item.credential_id)
+  if (!ids.length) return
+  resetCredentialTestState()
+  credentialBatchTargets.value = ids
+  await loadCredentialTestSettings()
+}
+
+async function loadCredentialTestSettings(): Promise<void> {
   const owner = credentialTestOwner
   const groupID = props.groupId
   const controller = new AbortController()
@@ -1337,7 +1509,7 @@ async function openCredentialTest(item: CredentialItemDto): Promise<void> {
     ]
     credentialTestModel.value = settings.validation_model ?? credentialTestModels.value[0]
     credentialTestProtocols.value = settings.validation_protocols
-    credentialTestProtocol.value = settings.validation_protocol ?? undefined
+    credentialTestProtocol.value = settings.validation_protocol ?? settings.validation_protocols[0]
   } catch {
     if (owner === credentialTestOwner && groupID === props.groupId)
       credentialTestRequestFailed.value = true
@@ -1372,7 +1544,12 @@ async function runCredentialTest(): Promise<void> {
   const item = credentialTestTarget.value
   const protocol = credentialTestProtocol.value
   const model = credentialTestModel.value?.trim()
-  if (!item || !protocol || !model || credentialTestSettingsPending.value) return
+  if (!protocol || !model || credentialTestSettingsPending.value) return
+  if (credentialBatchTargets.value.length) {
+    await startBatchTest({ protocol, model }, credentialBatchTargets.value)
+    return
+  }
+  if (!item) return
   if (props.connectionType !== 'api_key' || batchBusy.value || pending(item.credential_id)) return
 
   credentialTestController?.abort()
@@ -1406,6 +1583,32 @@ async function runCredentialTest(): Promise<void> {
       setPending(item.credential_id, 'test', false)
     }
   }
+}
+
+async function startBatchTest(
+  options: CredentialTestOptions,
+  ids: number[],
+  retry = false,
+): Promise<void> {
+  if (bulkActionsBusy.value || props.connectionType !== 'api_key' || !ids.length) return
+  const groupID = props.groupId
+  resetCredentialTestState()
+  await runTestBatch(
+    ids,
+    options,
+    async (id, selected, signal) => {
+      const result = await testCredentialConnection(
+        client,
+        groupID,
+        id,
+        selected.protocol as AccessProtocol,
+        selected.model,
+        signal,
+      )
+      return { outcome: result.outcome, latency: result.latency_ms, reason: result.reason }
+    },
+    retry,
+  )
 }
 
 async function confirmTestedCredentialRestore(): Promise<void> {
@@ -1465,6 +1668,19 @@ async function confirmTestedCredentialRestore(): Promise<void> {
     })
   }
   resetCredentialTestState()
+}
+
+async function saveCredentialName(item: CredentialItemDto, name: string): Promise<string> {
+  if (batchBusy.value || pending(item.credential_id)) throw new Error('CREDENTIAL_NAME_UNAVAILABLE')
+  feedback.value = ''
+  setPending(item.credential_id, 'name', true)
+  try {
+    const result = await updateCredential(client, props.groupId, item.credential_id, { name })
+    await reconcileItem(result, false)
+    return result.name
+  } finally {
+    setPending(item.credential_id, 'name', false)
+  }
 }
 
 async function saveCredentialProxy(item: CredentialItemDto, value: ProxyMutation): Promise<void> {
@@ -1566,7 +1782,10 @@ async function runBatch(
             <AppButton
               variant="secondary"
               :busy="batchBusy"
-              :disabled="bulkActionsBusy || (collection?.summary.total ?? 0) === 0"
+              :disabled="
+                bulkActionsBusy ||
+                (connectionType !== 'api_key' && (collection?.summary.total ?? 0) === 0)
+              "
             >
               <ListChecks :size="16" aria-hidden="true" />
               {{ t('group.credentials.full.actions') }}
@@ -1574,24 +1793,59 @@ async function runBatch(
             </AppButton>
           </template>
           <div class="group-credentials__full-menu">
-            <button type="button" :disabled="bulkActionsBusy" @click="openFullAction('download')">
+            <button
+              v-if="connectionType === 'api_key'"
+              type="button"
+              :disabled="bulkActionsBusy"
+              @click="openFullAction('import')"
+            >
+              <Upload :size="15" aria-hidden="true" />
+              {{ t('group.credentials.full.import') }}
+            </button>
+            <button
+              type="button"
+              :disabled="bulkActionsBusy || !collection?.summary.total"
+              @click="openFullAction('download')"
+            >
               <Download :size="15" aria-hidden="true" />
               {{ t('group.credentials.full.download') }}
             </button>
-            <button type="button" :disabled="bulkActionsBusy" @click="openFullAction('enable')">
+            <button
+              type="button"
+              :disabled="bulkActionsBusy || !collection?.summary.total"
+              @click="openFullAction('enable')"
+            >
               <CircleCheck :size="15" aria-hidden="true" />
               {{ t('group.credentials.full.enable') }}
             </button>
-            <button type="button" :disabled="bulkActionsBusy" @click="openFullAction('disable')">
+            <button
+              type="button"
+              :disabled="bulkActionsBusy || !collection?.summary.total"
+              @click="openFullAction('disable')"
+            >
               <CircleOff :size="15" aria-hidden="true" />
               {{ t('group.credentials.full.disable') }}
             </button>
-            <button type="button" :disabled="bulkActionsBusy" @click="openFullAction('restore')">
+            <button
+              type="button"
+              :disabled="bulkActionsBusy || !collection?.summary.total"
+              @click="openFullAction('restore')"
+            >
               <RotateCcw :size="15" aria-hidden="true" />
               {{ t('group.credentials.full.restore') }}
             </button>
           </div>
         </AppPopover>
+        <input
+          v-if="connectionType === 'api_key'"
+          ref="importInput"
+          type="file"
+          hidden
+          multiple
+          accept=".txt,.json,.jsonl,text/plain,application/json"
+          :disabled="bulkActionsBusy"
+          @change="selectImportFiles"
+        />
         <AppButton
           v-if="connectionType === 'subscription' && authorizationMethods.length > 0"
           :disabled="bulkActionsBusy"
@@ -1751,14 +2005,50 @@ async function runBatch(
             selectedSubscriptionCredentialsReady
           "
           :can-download="connectionType === 'subscription'"
+          :can-test="connectionType === 'api_key'"
           @toggle-select="setAllVisible(!allVisibleSelected)"
           @enable="runBatch('enable')"
           @disable="runBatch('disable')"
           @sync="syncSelectedObservations"
           @download="downloadSelectedCredentials"
+          @test="openBatchCredentialTest"
           @remove="deleteTarget = { ids: [...selectedIds] }"
         />
       </div>
+      <InlineFeedback
+        v-if="testBatch"
+        :tone="
+          testBatchPending
+            ? 'info'
+            : testBatchCounts.passed === testBatchCounts.total
+              ? 'success'
+              : 'warning'
+        "
+        appearance="ledger"
+      >
+        {{ testBatch.options.protocol }} · {{ testBatch.options.model }}<br />
+        {{ t('credentialBatchTest.progress', testBatchCounts) }}
+        <template v-if="testBatchCounts.cancelled">
+          · {{ t('credentialBatchTest.cancelled', { count: testBatchCounts.cancelled }) }}</template
+        >
+        <template #action>
+          <AppButton
+            v-if="testBatchPending"
+            variant="secondary"
+            size="compact"
+            @click="stopTestBatch"
+            >{{ t('credentialBatchTest.stop') }}</AppButton
+          >
+          <AppButton
+            v-else-if="testBatchRetryIDs.length"
+            variant="secondary"
+            size="compact"
+            :disabled="bulkActionsBusy"
+            @click="startBatchTest(testBatch.options, testBatchRetryIDs, true)"
+            >{{ t('credentialBatchTest.retry') }}</AppButton
+          >
+        </template>
+      </InlineFeedback>
       <SkeletonSurface
         v-if="collectionTransition"
         variant="collection"
@@ -1834,6 +2124,7 @@ async function runBatch(
               :channel-mark="channelDescriptor?.mark"
               :capabilities="channelCapabilities"
               :save-proxy="(value) => saveCredentialProxy(item, value)"
+              :save-name="(value) => saveCredentialName(item, value)"
               @update:selected="setSelected(item.credential_id, $event)"
               @toggle="mutateItem($event, 'toggle')"
               @restore="mutateItem($event, 'restore')"
@@ -1846,7 +2137,7 @@ async function runBatch(
               @remove="
                 deleteTarget = {
                   ids: [$event.credential_id],
-                  mask: $event.account.email ?? $event.mask,
+                  mask: $event.label,
                 }
               "
             />
@@ -1876,10 +2167,12 @@ async function runBatch(
             "
             :selected="selectedIds.has(item.credential_id)"
             :busy="rowBusy(item.credential_id)"
+            :test-state="testBatchItems.get(item.credential_id)"
             :expanded="credentialExpanded(item.credential_id)"
             :weight-editor-open="routeState.weightCredentialID === item.credential_id"
             :resolve-copy-value="resolveCopyValue"
             :save-proxy="(value) => saveCredentialProxy(item, value)"
+            :save-name="(value) => saveCredentialName(item, value)"
             :proxy-supported="channelCapabilities.outbound_proxy"
             @update:selected="setSelected(item.credential_id, $event)"
             @update:expanded="setExpanded(item.credential_id, $event)"
@@ -1889,7 +2182,7 @@ async function runBatch(
             @test="openCredentialTest"
             @toggle="mutateItem($event, 'toggle')"
             @restore="mutateItem($event, 'restore')"
-            @remove="deleteTarget = { ids: [$event.credential_id], mask: $event.mask }"
+            @remove="deleteTarget = { ids: [$event.credential_id], mask: $event.label }"
           />
         </LedgerRecordList>
         <PaginationBar
@@ -1907,8 +2200,9 @@ async function runBatch(
       </template>
     </template>
     <CredentialTestDialog
-      :open="credentialTestTarget !== undefined"
-      :mask="credentialTestTarget?.mask ?? ''"
+      :open="credentialTestTarget !== undefined || credentialBatchTargets.length > 0"
+      :batch-count="credentialBatchTargets.length"
+      :mask="credentialTestTarget?.label ?? ''"
       :model="credentialTestModel"
       :models="credentialTestModels"
       :protocol="credentialTestProtocol"
@@ -1937,9 +2231,22 @@ async function runBatch(
       :tone="fullActionTarget === 'disable' ? 'danger' : 'default'"
       description-tone="warning"
       :pending="fullActionBusy"
-      @update:open="!$event && !fullActionBusy && (fullActionTarget = undefined)"
+      :confirm-disabled="
+        fullActionTarget === 'import' &&
+        Boolean(importOperation.operation.value) &&
+        !importOperation.canRetry.value
+      "
+      @update:open="!$event && closeFullAction()"
       @confirm="confirmFullAction"
-    />
+    >
+      <InlineFeedback
+        v-if="fullActionTarget === 'import' && importFeedback"
+        tone="danger"
+        appearance="ledger"
+      >
+        {{ importFeedback }}
+      </InlineFeedback>
+    </AppConfirmDialog>
     <AppConfirmDialog
       appearance="ledger"
       :open="resetTarget !== undefined"

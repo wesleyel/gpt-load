@@ -1,6 +1,6 @@
 package embedded
 
-import antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
+import antigravityauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 
 // AntigravityAPIEndpoints 集中声明凭据准备完成后的业务端点，不包含 OAuth 与身份核验。
 type AntigravityAPIEndpoints struct {
@@ -15,7 +15,7 @@ func ResolveAntigravityAPIEndpoints(apiRoot string) (AntigravityAPIEndpoints, er
 	endpoints := AntigravityAPIEndpoints{
 		ExecutionBase:        antigravityExecutionBase,
 		FetchModelsURL:       antigravityExecutionBase + "/" + antigravityauth.APIVersion + ":fetchAvailableModels",
-		LoadCodeAssistURL:    antigravityauth.APIEndpoint + "/" + antigravityauth.APIVersion + ":loadCodeAssist",
+		LoadCodeAssistURL:    antigravityauth.DailyAPIEndpoint + "/" + antigravityauth.APIVersion + ":loadCodeAssist",
 		RetrieveUserQuotaURL: antigravityauth.DailyAPIEndpoint + "/" + antigravityauth.APIVersion + ":retrieveUserQuotaSummary",
 	}
 	for _, endpoint := range []*string{&endpoints.ExecutionBase, &endpoints.FetchModelsURL, &endpoints.LoadCodeAssistURL, &endpoints.RetrieveUserQuotaURL} {

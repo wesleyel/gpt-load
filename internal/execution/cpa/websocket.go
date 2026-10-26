@@ -93,13 +93,22 @@ type observedWebsocketSession struct {
 	handshake subscription.PassiveQuotaSample
 }
 
+func (s *observedWebsocketSession) Interrupt(ctx context.Context, payload []byte) error {
+	sender, ok := s.WebsocketSession.(execution.WebsocketInterrupter)
+	if !ok {
+		return execution.ErrWebsocketInterruptUnsupported
+	}
+	return sender.Interrupt(ctx, payload)
+}
+
 func (s *observedWebsocketSession) ExecuteTurn(ctx context.Context, payload []byte, emit func(context.Context, []byte) error) execution.WebsocketResult {
 	return s.WebsocketSession.ExecuteTurn(ctx, payload, func(ctx context.Context, event []byte) error {
 		observedAt := time.Now()
 		windows := codex.NormalizeWebsocketQuotaWindows(event, observedAt)
-		if len(windows) > 0 {
+		credits := codex.NormalizeWebsocketCredits(event, observedAt)
+		if len(windows) > 0 || credits != nil {
 			s.adapter.credentials.RecordPassiveQuotaPair(s.spec.Credential.ID, s.spec.Credential.IdentityGeneration,
-				s.handshake, subscription.PassiveQuotaSample{ObservedAtMS: observedAt.UnixMilli(), Windows: windows})
+				s.handshake, subscription.PassiveQuotaSample{ObservedAtMS: observedAt.UnixMilli(), Windows: windows, Credits: credits})
 		}
 		if emit != nil {
 			return emit(ctx, event)
@@ -118,8 +127,9 @@ func (s *observedWebsocketSession) observeHeaders(headers http.Header, observedA
 		signals[name] = strings.Join(values, ",")
 	}
 	windows := codex.NormalizePassiveQuotaWindows(signals, observedAt)
-	s.handshake = subscription.PassiveQuotaSample{ObservedAtMS: observedAt.UnixMilli(), Windows: windows}
-	s.adapter.recordPassiveQuotaObservation(s.spec, observedAt, windows)
+	credits := codex.NormalizePassiveCredits(signals, observedAt)
+	s.handshake = subscription.PassiveQuotaSample{ObservedAtMS: observedAt.UnixMilli(), Windows: windows, Credits: credits}
+	s.adapter.recordPassiveQuotaObservation(s.spec, observedAt, windows, credits)
 }
 
 func (*codexProviderBridge) openWebsocket(spec execution.AttemptSpec, credential providerCredential, baseURL, proxyURL string, observeHeaders func(http.Header, time.Time)) (execution.WebsocketSession, error) {
@@ -142,6 +152,15 @@ func (*codexProviderBridge) openWebsocket(spec execution.AttemptSpec, credential
 
 type codexWebsocketSession struct{ session *codex.WSSession }
 
+func (s *codexWebsocketSession) Interrupt(ctx context.Context, payload []byte) error {
+	err := s.session.Interrupt(ctx, payload)
+	var failure *codex.WSError
+	if errors.As(err, &failure) && failure.Code == "response_not_active" {
+		return execution.ErrWebsocketResponseNotActive
+	}
+	return err
+}
+
 func (s *codexWebsocketSession) Done() <-chan struct{} { return s.session.Done() }
 func (s *codexWebsocketSession) Close() error          { return s.session.Close() }
 func (s *codexWebsocketSession) ExecuteTurn(ctx context.Context, payload []byte, emit func(context.Context, []byte) error) execution.WebsocketResult {
@@ -155,7 +174,7 @@ func (s *codexWebsocketSession) ExecuteTurn(ctx context.Context, payload []byte,
 	if result.DispatchState == codex.WSMaybeSent {
 		state = execution.DispatchMaybeSent
 	}
-	return execution.WebsocketResult{DispatchState: state, Header: result.Headers, HeaderObservedAt: result.HeaderObservedAt, Error: codexWebsocketEvidence(ctx, err)}
+	return execution.WebsocketResult{AppliedReasoning: appliedReasoning(result.AppliedReasoningEffort, result.AppliedReasoningMode, result.AppliedReasoningBudgetTokens), DispatchState: state, Header: result.Headers, HeaderObservedAt: result.HeaderObservedAt, Error: codexWebsocketEvidence(ctx, err)}
 }
 
 func codexWebsocketEvidence(ctx context.Context, err error) *execution.ErrorEvidence {

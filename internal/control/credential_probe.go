@@ -460,7 +460,7 @@ func (s *Service) captureCredentialProbe(
 		)
 	}
 	entry := entries[0]
-	expectedProxy, expectedProxyFingerprint, err := storedProxyIdentity(s.encryption, credentialRow.ProxyConfig)
+	expectedProxy, expectedProxyFingerprint, err := s.storedProxyIdentity(ctx, s.db, credentialRow.ProxyConfig)
 	if err != nil {
 		return state.GroupView{}, groupValidationTarget{}, credentialProbeCredential{}, err
 	}
@@ -524,7 +524,7 @@ func credentialProbeRef(entry state.CredentialEntry) state.CredentialRef {
 func credentialProbeCredentialFromEntry(entry state.CredentialEntry) credentialProbeCredential {
 	return credentialProbeCredential{
 		ref:           credentialProbeRef(entry),
-		cooldownUntil: entry.CooldownUntil,
+		cooldownUntil: entry.RuntimeView().CooldownUntil,
 	}
 }
 
@@ -653,7 +653,7 @@ func (s *Service) compileDisabledGroupProbe(ctx context.Context, row models.Grou
 		return state.GroupView{}, err
 	}
 	group.Enabled = true
-	group.Proxy, err = decryptProxyOverride(s.encryption, row.ProxyConfig)
+	group.Proxy, err = s.resolvedProxyOverride(ctx, s.db, row.ProxyConfig)
 	if err != nil {
 		return state.GroupView{}, err
 	}

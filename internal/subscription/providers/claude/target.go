@@ -3,7 +3,7 @@ package claude
 import (
 	"context"
 
-	cpaembedded "github.com/router-for-me/CLIProxyAPI/v7/gptload-embedded/embedded"
+	cpaembedded "github.com/router-for-me/CLIProxyAPI/v8/gptload-embedded/embedded"
 )
 
 // claudeAPIOptions 只为凭据准备完成后的业务调用设置代理目标。
@@ -20,5 +20,6 @@ func claudeAPIOptions(ctx context.Context, apiRoot string) (cpaembedded.ClaudeOp
 	options.RolesURL = endpoints.RolesURL
 	options.BootstrapURL = endpoints.BootstrapURL
 	options.UsageURL = endpoints.UsageURL
+	options.ResetBaseURL = endpoints.ExecutionBase
 	return options, nil
 }

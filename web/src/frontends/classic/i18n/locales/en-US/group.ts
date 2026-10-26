@@ -1,4 +1,6 @@
+import { credentialTestMessages } from '@shared/credential-test-messages'
 export default {
+  credentialBatchTest: credentialTestMessages['en-US'],
   groups: {
     title: 'Groups',
     collection: {
@@ -211,11 +213,6 @@ export default {
         headers: 'Upstream request header rules',
         danger: 'Danger zone',
       },
-      routing: {
-        description: 'Adjust the relative weight used for request allocation.',
-        weightHelp:
-          'Default: 50. Range: 1–100. Multiplied by credential weight to determine allocation shares.',
-      },
       headers: {
         description:
           'Header rules applied to outgoing upstream requests — set, override, or remove; overriding fully replaces the global rules instead of merging with them.',
@@ -324,7 +321,9 @@ export default {
         validationModelPlaceholder: 'Search or enter a model ID',
         validationModelHelp:
           'Leave empty to use the first model in this Group; enter the upstream model ID, not an alias.',
-        weight: 'Group weight',
+        priority: 'Priority',
+        priorityError: 'Enter an integer from -2147483648 to 2147483647',
+        weight: 'Weight',
         auto: 'Auto',
         manual: 'Manual',
         weightError: 'Enter a whole number from 1 to 100',
@@ -337,6 +336,9 @@ export default {
         first_byte_timeout: 'Native response / stream first-event timeout',
         request_timeout: 'Upstream request timeout per attempt',
         stream_idle_timeout: 'Stream-idle timeout',
+        concurrency_limit: 'Concurrency limit',
+        concurrencyHelp:
+          '0 means unlimited. Applies to data-plane concurrency; reject immediately when full.',
         blacklist_threshold: 'Consecutive-failure blacklist threshold',
         blacklistThresholdHelp:
           'A credential is blacklisted after this many consecutive failures; 0 disables automatic blacklisting.',
@@ -396,6 +398,12 @@ export default {
       settings: 'Settings',
     },
     credentials: {
+      name: 'Name',
+      namePlaceholder: 'Optional credential alias',
+      nameSaveFailed: 'Could not save the name. Try again.',
+      showAccount: 'Show full account',
+      hideAccount: 'Hide full account',
+
       modelCooldown: {
         label: 'Model cooldown',
         count: 'Model cooldown · {count}',
@@ -581,6 +589,8 @@ export default {
         moreActions: 'More actions',
         autoRenews: 'renews when used',
         resetCredits: 'Reset credits',
+        creditBalance: 'Credits',
+        creditUnlimited: 'Unlimited',
         resetCreditsCount: '{count} available',
         resetCreditsTooltipTitle: 'Reset credit details',
         resetCreditsTooltipItem: 'Credit {index}: {expires}',
@@ -713,6 +723,7 @@ export default {
       },
       full: {
         actions: 'All credentials',
+        import: 'Import from files',
         download: 'Download all',
         enable: 'Enable all',
         disable: 'Disable all',
@@ -741,6 +752,14 @@ export default {
           restore: 'Restored {count} {kind}',
         },
         failed: 'Unable to complete the full-Group operation',
+      },
+      fileImport: {
+        description:
+          'Add {count} credentials from the files to this group. Existing duplicates will be skipped.',
+        empty: 'The selected files contain no credentials.',
+        too_large: 'The import exceeds 32 MiB. Split it into smaller files.',
+        too_many: 'Import up to 5000 credentials at a time. Split the files and retry.',
+        read_failed: 'Unable to read the files. Choose UTF-8 encoded TXT, JSON or JSONL files.',
       },
       batch: {
         selected: '{count} selected',

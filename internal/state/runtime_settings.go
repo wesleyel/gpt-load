@@ -9,31 +9,37 @@ import (
 	"strings"
 	"time"
 
+	"gpt-load/internal/health"
 	"gpt-load/internal/parameteroverride"
 	"gpt-load/internal/platform/config"
 	"gpt-load/internal/platform/httpheader"
 )
 
 const (
-	SettingFirstByteTimeout          = "first_byte_timeout"
-	SettingRequestTimeout            = "request_timeout"
-	SettingStreamIdleTimeout         = "stream_idle_timeout"
-	SettingHeaderRules               = "header_rules"
-	SettingCORS                      = "cors"
-	SettingResponseHeaderRules       = "response_header_rules"
-	SettingRetryCount                = "retry_count"
-	SettingRouteStrategy             = "route_strategy"
-	SettingBlacklistThreshold        = "blacklist_threshold"
-	SettingAffinityEnabled           = "affinity_enabled"
-	SettingCodexLiveMode             = "codex_live_mode"
-	SettingResponsesWebsocketEnabled = "responses_websocket_enabled"
-	SettingEmptyResponseRetry        = "empty_response_retry"
-	SettingAffinityTTL               = "affinity_ttl"
-	SettingAffinityCapacity          = "affinity_capacity"
-	SettingValidationInterval        = "validation_interval"
-	SettingRequestLogRetentionDays   = "request_log_retention_days"
-	SettingModelsDevAutoSyncEnabled  = "models_dev_auto_sync_enabled"
-	SettingParameterOverrides        = "parameter_overrides"
+	SettingGlobalConcurrencyLimit           = "global_concurrency_limit"
+	SettingDefaultAccessKeyConcurrencyLimit = "default_access_key_concurrency_limit"
+	SettingDefaultGroupConcurrencyLimit     = "default_group_concurrency_limit"
+	SettingConcurrencyLimit                 = "concurrency_limit"
+	SettingFirstByteTimeout                 = "first_byte_timeout"
+	SettingRequestTimeout                   = "request_timeout"
+	SettingStreamIdleTimeout                = "stream_idle_timeout"
+	SettingHeaderRules                      = "header_rules"
+	SettingCORS                             = "cors"
+	SettingResponseHeaderRules              = "response_header_rules"
+	SettingRetryCount                       = "retry_count"
+	SettingRouteStrategy                    = "route_strategy"
+	SettingBlacklistThreshold               = "blacklist_threshold"
+	SettingAffinityEnabled                  = "affinity_enabled"
+	SettingCodexLiveMode                    = "codex_live_mode"
+	SettingResponsesWebsocketEnabled        = "responses_websocket_enabled"
+	SettingEmptyResponseRetry               = "empty_response_retry"
+	SettingAffinityTTL                      = "affinity_ttl"
+	SettingAffinityCapacity                 = "affinity_capacity"
+	SettingValidationInterval               = "validation_interval"
+	SettingRequestLogRetentionDays          = "request_log_retention_days"
+	SettingModelsDevAutoSyncEnabled         = "models_dev_auto_sync_enabled"
+	SettingParameterOverrides               = "parameter_overrides"
+	SettingErrorRules                       = "error_rules"
 )
 
 type CodexLiveMode string
@@ -61,27 +67,33 @@ const (
 )
 
 type RuntimeSettings struct {
-	FirstByteTimeout          time.Duration
-	RequestTimeout            time.Duration
-	StreamIdleTimeout         time.Duration
-	HeaderRules               HeaderRules
-	CORS                      CORSConfig
-	ResponseHeaderRules       HeaderRules
-	RetryCount                int
-	RouteStrategy             RouteStrategy
-	BlacklistThreshold        int
-	AffinityEnabled           bool
-	CodexLiveMode             CodexLiveMode
-	ResponsesWebsocketEnabled bool
-	EmptyResponseRetry        bool
-	AffinityTTL               time.Duration
-	AffinityCapacity          int
-	ValidationInterval        time.Duration
-	RequestLogRetentionDays   int
-	ModelsDevAutoSyncEnabled  bool
+	ErrorRules                       health.ErrorRules
+	GlobalConcurrencyLimit           int64
+	DefaultAccessKeyConcurrencyLimit int64
+	DefaultGroupConcurrencyLimit     int64
+	FirstByteTimeout                 time.Duration
+	RequestTimeout                   time.Duration
+	StreamIdleTimeout                time.Duration
+	HeaderRules                      HeaderRules
+	CORS                             CORSConfig
+	ResponseHeaderRules              HeaderRules
+	RetryCount                       int
+	RouteStrategy                    RouteStrategy
+	BlacklistThreshold               int
+	AffinityEnabled                  bool
+	CodexLiveMode                    CodexLiveMode
+	ResponsesWebsocketEnabled        bool
+	EmptyResponseRetry               bool
+	AffinityTTL                      time.Duration
+	AffinityCapacity                 int
+	ValidationInterval               time.Duration
+	RequestLogRetentionDays          int
+	ModelsDevAutoSyncEnabled         bool
 }
 
 type ResolvedGroupSettings struct {
+	ErrorRules                health.ErrorRules
+	ConcurrencyLimit          int64
 	Timeouts                  TimeoutConfig
 	HeaderRules               HeaderRules
 	BlacklistThreshold        int
@@ -117,7 +129,8 @@ func DefaultRuntimeSettings() RuntimeSettings {
 
 func IsRuntimeSettingKey(key string) bool {
 	switch key {
-	case SettingFirstByteTimeout,
+	case SettingGlobalConcurrencyLimit, SettingDefaultAccessKeyConcurrencyLimit, SettingDefaultGroupConcurrencyLimit,
+		SettingFirstByteTimeout,
 		SettingRequestTimeout,
 		SettingStreamIdleTimeout,
 		SettingHeaderRules,
@@ -136,6 +149,8 @@ func IsRuntimeSettingKey(key string) bool {
 		SettingRequestLogRetentionDays,
 		SettingModelsDevAutoSyncEnabled:
 		return true
+	case SettingErrorRules:
+		return true
 	default:
 		return false
 	}
@@ -145,6 +160,19 @@ func ResolveRuntimeSettings(settings config.Settings) (RuntimeSettings, error) {
 	resolved := DefaultRuntimeSettings()
 	for key, value := range settings {
 		switch key {
+		case SettingGlobalConcurrencyLimit, SettingDefaultAccessKeyConcurrencyLimit, SettingDefaultGroupConcurrencyLimit:
+			limit, err := nonNegativeWholeNumber(key, value)
+			if err != nil {
+				return RuntimeSettings{}, err
+			}
+			switch key {
+			case SettingGlobalConcurrencyLimit:
+				resolved.GlobalConcurrencyLimit = int64(limit)
+			case SettingDefaultAccessKeyConcurrencyLimit:
+				resolved.DefaultAccessKeyConcurrencyLimit = int64(limit)
+			case SettingDefaultGroupConcurrencyLimit:
+				resolved.DefaultGroupConcurrencyLimit = int64(limit)
+			}
 		case SettingFirstByteTimeout:
 			seconds, err := positiveWholeSeconds(key, value)
 			if err != nil {
@@ -169,6 +197,12 @@ func ResolveRuntimeSettings(settings config.Settings) (RuntimeSettings, error) {
 				return RuntimeSettings{}, err
 			}
 			resolved.HeaderRules = rules
+		case SettingErrorRules:
+			rules, err := health.CompileErrorRules(value, "global")
+			if err != nil {
+				return RuntimeSettings{}, err
+			}
+			resolved.ErrorRules = rules
 		case SettingCORS:
 			cors, err := parseCORSConfig(value)
 			if err != nil {
@@ -270,6 +304,8 @@ func ResolveGroupRuntimeSettings(
 	settings config.Settings,
 ) (ResolvedGroupSettings, error) {
 	resolved := ResolvedGroupSettings{
+		ErrorRules:       base.ErrorRules,
+		ConcurrencyLimit: base.DefaultGroupConcurrencyLimit,
 		Timeouts: TimeoutConfig{
 			FirstByte:  base.FirstByteTimeout,
 			Request:    base.RequestTimeout,
@@ -284,6 +320,12 @@ func ResolveGroupRuntimeSettings(
 	}
 	for key, value := range settings {
 		switch key {
+		case SettingConcurrencyLimit:
+			limit, err := nonNegativeWholeNumber(key, value)
+			if err != nil {
+				return ResolvedGroupSettings{}, err
+			}
+			resolved.ConcurrencyLimit = int64(limit)
 		case SettingFirstByteTimeout:
 			seconds, err := positiveWholeSeconds(key, value)
 			if err != nil {
@@ -347,6 +389,12 @@ func ResolveGroupRuntimeSettings(
 				return ResolvedGroupSettings{}, err
 			}
 			resolved.ParameterOverrides = parsed
+		case SettingErrorRules:
+			rules, err := health.CompileErrorRules(value, "group")
+			if err != nil {
+				return ResolvedGroupSettings{}, err
+			}
+			resolved.ErrorRules = rules
 		default:
 			return ResolvedGroupSettings{}, fmt.Errorf("unknown group setting %q", key)
 		}
@@ -356,6 +404,9 @@ func ResolveGroupRuntimeSettings(
 
 func ValidateRuntimeSetting(key string, value any) error {
 	switch key {
+	case SettingErrorRules:
+		_, err := health.CompileErrorRules(value, "global")
+		return err
 	case SettingFirstByteTimeout,
 		SettingRequestTimeout,
 		SettingStreamIdleTimeout,
@@ -371,7 +422,7 @@ func ValidateRuntimeSetting(key string, value any) error {
 	case SettingResponseHeaderRules:
 		_, err := parseResponseHeaderRules(value)
 		return err
-	case SettingRetryCount, SettingBlacklistThreshold:
+	case SettingGlobalConcurrencyLimit, SettingDefaultAccessKeyConcurrencyLimit, SettingDefaultGroupConcurrencyLimit, SettingRetryCount, SettingBlacklistThreshold:
 		_, err := nonNegativeWholeNumber(key, value)
 		return err
 	case SettingCodexLiveMode:
